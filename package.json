@@ -1,12 +1,10 @@
 {
   "name": "ip-logger",
   "version": "1.0.0",
-  "description": "IP information logger to Discord",
-  "main": "api/log.js",
-  "scripts": {
-    "start": "node api/log.js"
-  },
   "dependencies": {
-    "node-fetch": "^3.3.0"
+    "node-fetch": "2.6.7"
+  },
+  "engines": {
+    "node": "16.x"
   }
 }
