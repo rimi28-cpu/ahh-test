@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IP Logger</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            text-align: center;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        
+        .loader {
+            display: inline-block;
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px 0;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .info-box {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 25px;
+            margin-top: 30px;
+            text-align: left;
+            display: none;
+        }
+        
+        .info-item {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .info-item:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+        
+        .info-label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .info-value {
+            color: #212529;
+            font-size: 1.1em;
+            margin-top: 5px;
+            word-break: break-all;
+        }
+        
+        .status {
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-weight: 500;
+            display: none;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .logo {
+            font-size: 3em;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🌐</div>
+        <h1>IP Information Logger</h1>
+        <p class="subtitle">Fetching your IP information...</p>
+        
+        <div class="loader"></div>
+        
+        <div id="infoBox" class="info-box">
+            <!-- Information will be populated here -->
+        </div>
+        
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const response = await fetch('/api/log');
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.querySelector('.subtitle').textContent = 'Information logged successfully!';
+                    
+                    // Display information
+                    const infoBox = document.getElementById('infoBox');
+                    const info = data.data;
+                    
+                    infoBox.innerHTML = `
+                        <div class="info-item">
+                            <div class="info-label">IP Address</div>
+                            <div class="info-value">${info.ip}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Location</div>
+                            <div class="info-value">${info.location.city}, ${info.location.region}, ${info.country.name}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Coordinates</div>
+                            <div class="info-value">${info.location.latitude}, ${info.location.longitude}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">ISP</div>
+                            <div class="info-value">${info.network.carrier.name}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Timezone</div>
+                            <div class="info-value">${info.timezone.timeZoneName} (${info.timezone.gmtOffsetString})</div>
+                        </div>
+                    `;
+                    
+                    infoBox.style.display = 'block';
+                    
+                    // Show success message
+                    const status = document.getElementById('status');
+                    status.textContent = '✓ Information has been sent to Discord webhook';
+                    status.className = 'status success';
+                    status.style.display = 'block';
+                    
+                } else {
+                    throw new Error(data.error || 'Failed to fetch information');
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                document.querySelector('.subtitle').textContent = 'Error fetching information';
+                document.querySelector('.loader').style.display = 'none';
+                
+                const status = document.getElementById('status');
+                status.textContent = `✗ Error: ${error.message}`;
+                status.className = 'status error';
+                status.style.display = 'block';
+            } finally {
+                document.querySelector('.loader').style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
