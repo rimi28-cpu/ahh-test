@@ -1,213 +1,254 @@
 // /pages/api/ip-logger.js
-// Vercel-compatible Next.js API route to log IP info using BigDataCloud (free-tier fields)
+// Next.js / Vercel route — single-file IP logger using only BigDataCloud
 
 export default async function handler(req, res) {
-  // -- CORS (adjust for production) --
+  // CORS (adjust for production security)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    // -------------------------
-    // 1) Client IP & UA (Vercel-friendly)
-    // -------------------------
-    let clientIP =
-      (req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket?.remoteAddress || '')
-        .toString();
+    // 1) Get client IP & UA (Vercel-friendly)
+    let clientIP = (
+      req.headers['x-forwarded-for'] ||
+      req.headers['x-real-ip'] ||
+      req.socket?.remoteAddress ||
+      ''
+    ).toString();
     if (!clientIP) clientIP = '0.0.0.0';
     if (clientIP.includes(',')) clientIP = clientIP.split(',')[0].trim();
     clientIP = clientIP.replace(/^::ffff:/, '');
 
     const userAgent = (req.headers['user-agent'] || 'Unknown').toString();
 
-    // -------------------------
-    // 2) Validate API Key
-    // -------------------------
-    const BIGDATACLOUD_API_KEY = process.env.BIGDATACLOUD_API_KEY;
-    if (!BIGDATACLOUD_API_KEY) {
-      return res.status(500).json({ success: false, error: 'Missing BIGDATACLOUD_API_KEY env var' });
+    // 2) API key check
+    const KEY = process.env.BIGDATACLOUD_API_KEY;
+    if (!KEY) {
+      return res.status(500).json({ success: false, error: 'Missing BIGDATACLOUD_API_KEY' });
     }
 
-    const BASE = 'https://api-bdc.net/data'; // BigDataCloud host used previously and works for free endpoints
+    const BASE = 'https://api-bdc.net/data';
+    const GEO_URL = `${BASE}/ip-geolocation-full?ip=${encodeURIComponent(clientIP)}&localityLanguage=en&key=${KEY}`;
 
-    // -------------------------
-    // 3) Fetch ip-geolocation-full (best-effort)
-    // -------------------------
+    // 3) Fetch BigDataCloud ip-geolocation-full
     let ipData = {};
     try {
-      const geoUrl = `${BASE}/ip-geolocation-full?ip=${encodeURIComponent(clientIP)}&localityLanguage=en&key=${BIGDATACLOUD_API_KEY}`;
-      const geoResp = await fetch(geoUrl);
-      const geoText = await geoResp.text();
-      if (!geoResp.ok) {
-        console.error('BigDataCloud geolocation error:', geoResp.status, geoText);
-        // continue with empty ipData but report error later if needed
-        throw new Error(`BigDataCloud geolocation failed: ${geoResp.status}`);
+      const r = await fetch(GEO_URL);
+      const txt = await r.text();
+      if (!r.ok) {
+        console.warn('BigDataCloud returned non-OK:', r.status, txt);
+        // still attempt to parse JSON if present
+        try { ipData = JSON.parse(txt || '{}'); } catch(e) { ipData = {}; }
+      } else {
+        ipData = JSON.parse(txt || '{}');
       }
-      ipData = JSON.parse(geoText || '{}');
-    } catch (e) {
-      console.warn('Failed to fetch ip-geolocation-full:', e.message);
-      // Continue: we'll still try timezone-by-ip later and return partial data
+    } catch (err) {
+      console.error('Failed to fetch BigDataCloud:', err.message);
+      // continue with empty ipData
+      ipData = {};
     }
 
-    // -------------------------
-    // 4) Determine bot/cloud/residential
-    // -------------------------
+    // 4) Simple bot & datacenter detection
     const isBot = /bot|crawler|spider|preview|screenshot|vercel|uptime|monitor/i.test(userAgent);
-    const orgName = (
-      ipData?.network?.organisation ||
-      ipData?.organisation ||
-      ipData?.asnOrganisation ||
-      ipData?.network?.name ||
-      (ipData?.asn && `AS${ipData.asn}`) ||
-      'Unknown'
+    const orgCandidate = String(
+      ipData?.network?.organisation ??
+      ipData?.organisation ??
+      ipData?.asnOrganisation ??
+      ipData?.network?.name ??
+      ipData?.operator ??
+      ipData?.isp ??
+      ''
     );
+    const isDatacenter = /vercel|digitalocean|amazon|google|cloudflare|azure|linode|ovh|hetzner|rackspace|alibaba|microsoft/i.test(orgCandidate.toLowerCase());
 
-    const isDatacenter = /vercel|digitalocean|amazon|google|cloudflare|azure|linode|ovh|hetzner|rackspace/i.test(
-      String(orgName).toLowerCase()
-    );
-
-    // -------------------------
-    // 5) Coordinates & timezone (try timezone-by-location then timezone-by-ip)
-    // -------------------------
+    // 5) Extract coordinates (many responses use ipData.location)
     const latitude = numberOrNull(ipData?.location?.latitude ?? ipData?.latitude);
     const longitude = numberOrNull(ipData?.location?.longitude ?? ipData?.longitude);
 
-    let timezoneData = null;
-    try {
-      if (latitude != null && longitude != null) {
-        const tzUrl = `${BASE}/timezone-by-location?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}&localityLanguage=en&key=${BIGDATACLOUD_API_KEY}`;
-        const tzResp = await fetch(tzUrl);
-        if (tzResp.ok) timezoneData = await tzResp.json();
-      }
-    } catch (e) {
-      console.warn('timezone-by-location failed:', e.message);
-    }
+    // 6) Extract region/state robustly (prefer principalSubdivision, then localityInfo administrative entries)
+    const regionFromPrincipal = ipData?.principalSubdivision ?? ipData?.location?.region ?? ipData?.region;
+    const regionFromLocalityInfo = extractRegionFromLocalityInfo(ipData?.localityInfo);
+    const region = regionFromPrincipal || regionFromLocalityInfo || 'Unknown';
 
-    // fallback: timezone-by-ip
-    if (!timezoneData) {
-      try {
-        const tzIpUrl = `${BASE}/timezone-by-ip?ip=${encodeURIComponent(clientIP)}&key=${BIGDATACLOUD_API_KEY}`;
-        const tzIpResp = await fetch(tzIpUrl);
-        if (tzIpResp.ok) timezoneData = await tzIpResp.json();
-      } catch (e) {
-        console.warn('timezone-by-ip failed:', e.message);
-      }
-    }
+    // 7) City extraction (city, locality, localityInfo administrative adminLevel 8)
+    const city = ipData?.city ?? ipData?.locality ?? extractCityFromLocalityInfo(ipData?.localityInfo) ?? 'Unknown';
 
-    // -------------------------
-    // 6) Confidence & accuracyRadius handling
-    // -------------------------
-    // BigDataCloud may provide confidence, accuracyRadius, and/or confidenceArea (polygon)
-    let confidence = ipData?.confidence ?? ipData?.location?.confidence ?? null;
-    let accuracyRadius = ipData?.location?.accuracyRadius ?? ipData?.accuracyRadius ?? null;
+    // 8) Country / continent / postal
+    const country = ipData?.countryName ?? ipData?.country?.name ?? ipData?.country ?? 'Unknown';
+    const countryCode = ipData?.countryCode ?? ipData?.country?.isoAlpha2 ?? ipData?.country?.isoCode ?? (ipData?.country?.iso ?? 'Unknown');
+    const continent = ipData?.continent ?? ipData?.continent?.name ?? 'Unknown';
+    const postalCode = ipData?.postcode ?? ipData?.location?.postalCode ?? ipData?.postalCode ?? 'Unknown';
+
+    // 9) Confidence / accuracy fields
+    let reportedConfidence = ipData?.confidence ?? ipData?.location?.confidence ?? null; // may be 'high','moderate','low' or numeric
+    reportedConfidence = typeof reportedConfidence === 'string' ? reportedConfidence.toLowerCase() : reportedConfidence;
+
+    // BigDataCloud may include a numeric accuracyRadius, or a confidenceArea polygon
+    const reportedAccuracyRadius = numberOrNull(ipData?.location?.accuracyRadius ?? ipData?.accuracyRadius ?? null);
     const confidenceArea = ipData?.confidenceArea ?? ipData?.location?.confidenceArea ?? null;
 
-    // If accuracy radius missing but a confidence polygon exists, compute a conservative radius (km)
-    if ((accuracyRadius == null || Number.isNaN(Number(accuracyRadius))) && confidenceArea) {
+    // compute radius from polygon if numeric radius missing
+    let computedAccuracyRadius = null;
+    if (reportedAccuracyRadius == null && confidenceArea) {
       try {
-        accuracyRadius = computeRadiusFromPolygon(confidenceArea); // returns km number
+        computedAccuracyRadius = computeRadiusFromPolygon(confidenceArea); // in km
       } catch (e) {
-        console.warn('computeRadiusFromPolygon failed:', e.message);
+        console.warn('computeRadiusFromPolygon error:', e.message);
       }
     }
 
-    // For datacenter/cloud IPs we prefer to not report an accuracy radius that looks precise:
+    // Final accuracy reporting logic:
+    // - prefer provider numeric radius if present
+    // - else use computed from polygon
+    // - if datacenter, hide accuracyRadius (to avoid false precision)
+    let finalAccuracyRadius = reportedAccuracyRadius ?? computedAccuracyRadius ?? null;
+
     if (isDatacenter) {
-      // keep confidence but downgrade to 'low' if not explicitly high
-      if (!confidence) confidence = 'low';
-      // hide radius for cloud IPs (makes output clearer)
-      accuracyRadius = null;
+      // datacenter IPs often produce coarse/meaningless radii — hide to avoid confusion
+      finalAccuracyRadius = null;
     }
 
-    // Normalize confidence value to friendly string if exists
-    if (typeof confidence === 'string') confidence = confidence.toLowerCase();
+    // add an explanatory note if the radius is very large
+    let accuracyNote = null;
+    if (finalAccuracyRadius != null && finalAccuracyRadius > 1000) {
+      accuracyNote = 'Very large radius — likely coarse geolocation (cloud provider, anycast, or low-resolution mapping).';
+    } else if (finalAccuracyRadius == null && (reportedConfidence || confidenceArea)) {
+      accuracyNote = 'Accuracy radius not available; confidence metadata present.';
+    }
 
-    // -------------------------
-    // 7) Network & ASN best-effort extraction
-    // -------------------------
-    const network = {
-      isp: ipData?.network?.carrier?.name || ipData?.isp || ipData?.network?.name || 'Unknown',
-      organization: orgName || 'Unknown',
-      asn: ipData?.network?.autonomousSystemNumber || ipData?.asn || (ipData?.asnNumeric ? `AS${ipData.asnNumeric}` : 'Unknown'),
-      connectionType: ipData?.network?.connectionType || ipData?.connectionType || 'Unknown'
-    };
+    // 10) Network / ISP / ASN extraction with many fallbacks
+    const isp =
+      ipData?.network?.carrier?.name ??
+      ipData?.isp ??
+      ipData?.network?.name ??
+      ipData?.carrier ??
+      ipData?.connection?.isp ??
+      null;
 
-    // -------------------------
-    // 8) Build response with every free-tier field we can include
-    // -------------------------
+    const asn =
+      ipData?.network?.autonomousSystemNumber ??
+      ipData?.asn ??
+      (ipData?.asnNumeric ? `AS${ipData.asnNumeric}` : null) ??
+      ipData?.network?.asn ??
+      null;
+
+    // 11) Build structured response containing everything BigDataCloud could provide
     const structuredData = {
       ip: clientIP || 'Unknown',
       timestamp: new Date().toISOString(),
-      userAgent: userAgent,
-      // Location fields (city, region/state, country, continent, postal code)
+      userAgent,
+      // Location
       location: {
-        city: ipData?.location?.city ?? ipData?.city ?? 'Unknown',
-        region: ipData?.location?.region ?? ipData?.principalSubdivision ?? ipData?.region ?? 'Unknown',
-        country: ipData?.country?.name ?? ipData?.countryName ?? ipData?.country ?? 'Unknown',
-        countryCode: ipData?.country?.isoAlpha2 ?? ipData?.countryCode ?? 'Unknown',
-        continent: ipData?.continent?.name ?? ipData?.continent ?? 'Unknown',
-        postalCode: ipData?.location?.postalCode ?? ipData?.postalCode ?? 'Unknown',
+        country,
+        countryCode,
+        continent,
+        region,                // region/state (robust)
+        city,                  // city (robust)
+        postalCode,
         latitude: latitude != null ? Number(latitude) : null,
         longitude: longitude != null ? Number(longitude) : null,
-        accuracyRadius: accuracyRadius != null ? Number(accuracyRadius) : null, // km or null
-        confidence: confidence ?? 'unknown',
-        confidenceArea: confidenceArea ?? null
+        reportedAccuracyRadius: reportedAccuracyRadius != null ? Number(reportedAccuracyRadius) : null, // km (provider)
+        computedAccuracyRadius: computedAccuracyRadius != null ? Number(computedAccuracyRadius) : null, // km (derived from polygon)
+        accuracyRadius: finalAccuracyRadius != null ? Number(finalAccuracyRadius) : null,
+        accuracyNote,
+        confidence: reportedConfidence ?? 'unknown',
+        confidenceArea: confidenceArea ?? null,
+        localityInfo: ipData?.localityInfo ?? null
       },
+
+      // Timezone (if present in ipData)
       timezone: {
-        name: timezoneData?.ianaTimeZone ?? timezoneData?.ianaTimeZoneName ?? timezoneData?.zoneName ?? 'Unknown',
-        localTime: timezoneData?.localTime ?? new Date().toISOString(),
-        gmtOffsetString: timezoneData?.gmtOffsetString ?? timezoneData?.utcOffset ?? '+00:00'
+        name: ipData?.timeZone ?? ipData?.timezone ?? ipData?.ianaTimeZone ?? ipData?.localityInfo?.informative?.find(x => typeof x.name === 'string' && x.name.includes('America/'))?.name ?? null,
+        rawTimezoneObject: ipData?.timeZoneData ?? ipData?.timezoneData ?? null
       },
-      network,
+
+      // Network
+      network: {
+        isp: isp ?? 'Unknown',
+        organization: orgCandidate || 'Unknown',
+        asn: asn ?? 'Unknown',
+        connectionType: ipData?.network?.connectionType ?? ipData?.connectionType ?? 'Unknown',
+      },
+
+      // Device (light UA parse)
       device: parseUserAgent(userAgent),
+
+      // metadata
       metadata: {
-        callingCode: ipData?.country?.callingCode ?? ipData?.callingCode ?? 'Unknown',
-        currency: ipData?.country?.currency?.code ?? ipData?.currency?.code ?? 'Unknown',
-        isEU: ipData?.country?.isEU ?? false,
         trafficType: isDatacenter ? 'cloud / proxy' : 'residential',
         isDatacenter,
         isBot,
-        // include some diagnostic values only in non-production for debugging
+        // include raw response for debugging in development only
         rawResponse: process.env.NODE_ENV === 'development' ? ipData : undefined
       }
     };
 
-    // -------------------------
-    // 9) Send optional Discord webhook (non-blocking)
-    // -------------------------
+    // 12) Optional: send to Discord (non-blocking)
     if (process.env.DISCORD_WEBHOOK_URL) {
       sendToDiscord(structuredData).catch(err => {
         console.warn('Discord webhook failed:', err.message);
       });
     }
 
-    // -------------------------
-    // 10) Return the JSON (includes coords and as many fields as free tier provides)
-    // -------------------------
+    // 13) Return JSON with all fields
     return res.status(200).json({
       success: true,
-      message: 'Complete IP data collected (best-effort, free-tier fields)',
+      message: 'IP data (from BigDataCloud) — best-effort extraction',
       data: structuredData
     });
+
   } catch (err) {
-    console.error('IP logger error:', err);
-    return res.status(500).json({
-      success: false,
-      error: err.message ?? String(err)
-    });
+    console.error('Handler error:', err);
+    return res.status(500).json({ success: false, error: String(err) });
   }
 }
 
-/* -------------------------
-   Helper utilities
-   ------------------------- */
+/* ------------------- HELPERS ------------------- */
 
 function numberOrNull(v) {
   if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// Prefer principalSubdivision; otherwise scan localityInfo.administrative for adminLevel 4 (state) or adminLevel near 4.
+// localityInfo format example: { administrative: [ { name, adminLevel, order, ... }, ... ], informative: [...] }
+function extractRegionFromLocalityInfo(localityInfo) {
+  if (!localityInfo || !Array.isArray(localityInfo.administrative)) return null;
+  const admin = localityInfo.administrative;
+
+  // 1) exact adminLevel 4 (many BigDataCloud examples use adminLevel 4 for state)
+  let candidate = admin.find(a => a.adminLevel === 4 || a.order === 5);
+  if (candidate && candidate.name) return candidate.name;
+
+  // 2) fallback: look for common keywords in description or name (state, province, region)
+  candidate = admin.find(a => /state|province|region|division|oblast/i.test(String(a.description ?? a.name ?? '')));
+  if (candidate && candidate.name) return candidate.name;
+
+  // 3) fallback: take the highest-order administrative whose adminLevel > 2 and < 8 (likely state)
+  candidate = admin
+    .filter(a => typeof a.adminLevel === 'number' && a.adminLevel > 2 && a.adminLevel < 8)
+    .sort((x, y) => x.adminLevel - y.adminLevel)[0];
+  if (candidate && candidate.name) return candidate.name;
+
+  // 4) no match
+  return null;
+}
+
+function extractCityFromLocalityInfo(localityInfo) {
+  if (!localityInfo || !Array.isArray(localityInfo.administrative)) return null;
+  const admin = localityInfo.administrative;
+  // many responses use adminLevel 8 or order 7/9 for city/locality
+  let candidate = admin.find(a => a.adminLevel === 8 || a.adminLevel === 7 || a.order === 7 || a.order === 9);
+  if (candidate && candidate.name) return candidate.name;
+
+  // fallback: look for an entry with description containing 'city'
+  candidate = admin.find(a => /city|town|municipality/i.test(String(a.description ?? a.name ?? '')));
+  if (candidate && candidate.name) return candidate.name;
+
+  return null;
 }
 
 function parseUserAgent(uaString) {
@@ -217,11 +258,10 @@ function parseUserAgent(uaString) {
   let device = 'Desktop';
 
   if (/OPR|Opera/.test(ua)) browser = 'Opera';
-  else if (/Edg\//.test(ua) || /Edge\//.test(ua)) browser = 'Edge';
-  else if (/Chrome\//.test(ua) && !/Edg\//.test(ua) && !/OPR/.test(ua)) browser = 'Chrome';
-  else if (/Firefox\//.test(ua)) browser = 'Firefox';
-  else if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) browser = 'Safari';
-  else if (/Chromium\//.test(ua)) browser = 'Chromium';
+  else if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/Chrome\/\d+/i.test(ua) && !/Edge\/|Edg\//i.test(ua) && !/OPR/i.test(ua)) browser = 'Chrome';
+  else if (/Firefox\/\d+/i.test(ua)) browser = 'Firefox';
+  else if (/Safari\/\d+/i.test(ua) && !/Chrome\//i.test(ua)) browser = 'Safari';
 
   if (/\bWindows\b/i.test(ua)) os = 'Windows';
   else if (/\bMacintosh\b|\bMac OS\b/i.test(ua)) os = 'Mac OS';
@@ -243,22 +283,20 @@ function parseUserAgent(uaString) {
 
 /**
  * computeRadiusFromPolygon(confidenceArea)
- * Accepts many shapes commonly returned:
- * - Array of [lat, lon]
- * - Array of [lon, lat]
- * - Array of { latitude, longitude } or { lat, lon }
+ * Accepts:
+ *  - array of [lat, lon]
+ *  - array of [lon, lat]
+ *  - array of { latitude, longitude } or { lat, lon }
  * Returns estimated radius in kilometers (max distance from centroid to vertices).
  */
 function computeRadiusFromPolygon(polygon) {
   if (!Array.isArray(polygon) || polygon.length === 0) throw new Error('Invalid polygon');
 
-  // Normalize to [{lat, lon}, ...]
-  const pts = polygon.map((p) => {
+  const pts = polygon.map(p => {
     if (Array.isArray(p) && p.length >= 2) {
+      // detect lat/lon ordering (lat range -90..90)
       const a = Number(p[0]), b = Number(p[1]);
-      // If first fits lat range, assume [lat, lon]
       if (!Number.isNaN(a) && Math.abs(a) <= 90 && Math.abs(b) <= 180) return { lat: a, lon: b };
-      // otherwise assume reversed [lon, lat]
       return { lat: Number(p[1]), lon: Number(p[0]) };
     } else if (p && typeof p === 'object') {
       const lat = numberOrNull(p.latitude ?? p.lat ?? p[1]);
@@ -266,20 +304,18 @@ function computeRadiusFromPolygon(polygon) {
       if (lat == null || lon == null) throw new Error('Unrecognized polygon point');
       return { lat, lon };
     } else {
-      throw new Error('Unrecognized polygon point format');
+      throw new Error('Unrecognized polygon point');
     }
   });
 
-  // Centroid (arithmetic mean - OK for small areas)
+  // centroid by arithmetic mean (ok for small areas)
   const centroid = pts.reduce((acc, pt) => {
-    acc.lat += pt.lat;
-    acc.lon += pt.lon;
-    return acc;
+    acc.lat += pt.lat; acc.lon += pt.lon; return acc;
   }, { lat: 0, lon: 0 });
   centroid.lat /= pts.length;
   centroid.lon /= pts.length;
 
-  // Max haversine distance
+  // max haversine distance
   let maxKm = 0;
   for (const pt of pts) {
     const d = haversineKm(centroid.lat, centroid.lon, pt.lat, pt.lon);
@@ -288,48 +324,37 @@ function computeRadiusFromPolygon(polygon) {
   return Number(maxKm.toFixed(2));
 }
 
-// Haversine distance in kilometers
 function haversineKm(lat1, lon1, lat2, lon2) {
   const toRad = deg => (deg * Math.PI) / 180;
   const R = 6371;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
-// Minimal Discord embed sender (optional)
+// Minimal Discord sender (optional) — small embed
 async function sendToDiscord(data) {
-  const webhookURL = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookURL) return;
-
+  const webhook = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhook) return;
   const embed = {
-    embeds: [{
-      title: '🌐 Visitor IP Logged',
-      color: 3447003,
-      timestamp: data.timestamp,
-      fields: [
-        { name: 'IP', value: `\`\`\`${data.ip}\`\`\``, inline: false },
-        { name: 'Country / Region / City', value: `${data.location.country} / ${data.location.region} / ${data.location.city}`, inline: true },
-        { name: 'Coords', value: `${data.location.latitude != null ? data.location.latitude : 'N/A'}, ${data.location.longitude != null ? data.location.longitude : 'N/A'}`, inline: true },
-        { name: 'Accuracy', value: data.location.accuracyRadius ? `${data.location.accuracyRadius} km` : 'N/A', inline: true },
-        { name: 'Confidence', value: (data.location.confidence || 'unknown').toString().toUpperCase(), inline: true },
-        { name: 'Network', value: `${data.network.organization}\nISP: ${data.network.isp}\nASN: ${data.network.asn}`, inline: true },
-        { name: 'Device', value: `${data.device.browser} / ${data.device.os} (${data.device.device})`, inline: true },
-        { name: 'Traffic', value: data.metadata.trafficType, inline: true },
-        { name: 'User Agent (truncated)', value: `\`\`\`${(data.userAgent || '').substring(0, 1000)}\`\`\``, inline: false }
-      ],
-      footer: { text: `BigDataCloud • ${data.location.continent}` }
-    }]
+    embeds: [
+      {
+        title: '🌐 Visitor IP Logged',
+        color: 3447003,
+        timestamp: data.timestamp,
+        fields: [
+          { name: 'IP', value: `\`${data.ip}\`` },
+          { name: 'Country / Region / City', value: `${data.location.country} / ${data.location.region} / ${data.location.city}` },
+          { name: 'Coords', value: data.location.latitude != null && data.location.longitude != null ? `${data.location.latitude}, ${data.location.longitude}` : 'N/A' },
+          { name: 'Accuracy (km)', value: data.location.accuracyRadius != null ? `${data.location.accuracyRadius}` : (data.location.computedAccuracyRadius != null ? `${data.location.computedAccuracyRadius} (computed)` : 'N/A') },
+          { name: 'Confidence', value: String(data.location.confidence ?? 'unknown').toUpperCase() },
+          { name: 'Network', value: `Org: ${data.network.organization}\nISP: ${data.network.isp}\nASN: ${data.network.asn}` },
+          { name: 'Device', value: `${data.device.browser} / ${data.device.os} (${data.device.device})` }
+        ]
+      }
+    ]
   };
-
-  await fetch(webhookURL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(embed)
-  });
-         }
+  await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(embed) });
+          }
