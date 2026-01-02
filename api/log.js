@@ -1,4 +1,4 @@
-// /pages/api/ip-logger.js - CORRECTED for actual BigDataCloud response structure
+// /pages/api/ip-logger.js - UPDATED with ASN fetch and confidence area mapping
 export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -26,8 +26,9 @@ export default async function handler(req, res) {
       return res.status(500).json({ success: false, error: 'Missing BIGDATACLOUD_API_KEY' });
     }
 
-    // --- Fetch from BigDataCloud ---
     const BASE = 'https://api-bdc.net/data';
+    
+    // --- 1. Fetch Main Geolocation Data ---
     const GEO_URL = `${BASE}/ip-geolocation-full?ip=${encodeURIComponent(clientIP)}&localityLanguage=en&key=${KEY}`;
     
     let ipData = {};
@@ -40,13 +41,33 @@ export default async function handler(req, res) {
       
       const rawText = await response.text();
       ipData = JSON.parse(rawText);
-      console.log('DEBUG: API fetch successful');
+      console.log('DEBUG: Main geolocation fetch successful');
     } catch (fetchError) {
       console.error('DEBUG: Fetch failed:', fetchError.message);
       return res.status(500).json({ success: false, error: 'Failed to fetch data' });
     }
 
-    // --- Extract Data from CORRECT Fields ---
+    // --- 2. Fetch ASN Data if Available ---
+    let asnData = {};
+    const asnNumber = ipData?.network?.autonomousSystemNumber;
+    
+    if (asnNumber) {
+      const ASN_URL = `${BASE}/asn-info-full?asn=AS${asnNumber}&localityLanguage=en&key=${KEY}`;
+      try {
+        const asnResponse = await fetch(ASN_URL);
+        if (asnResponse.ok) {
+          const asnRawText = await asnResponse.text();
+          asnData = JSON.parse(asnRawText);
+          console.log('DEBUG: ASN data fetch successful');
+        } else {
+          console.warn('DEBUG: ASN fetch failed, status:', asnResponse.status);
+        }
+      } catch (asnError) {
+        console.warn('DEBUG: ASN fetch error:', asnError.message);
+      }
+    }
+
+    // --- Extract Data from Main Response ---
     // Location data
     const latitude = ipData?.location?.latitude || null;
     const longitude = ipData?.location?.longitude || null;
@@ -63,11 +84,12 @@ export default async function handler(req, res) {
     const currency = ipData?.country?.currency?.code || '';
     const currencyName = ipData?.country?.currency?.name || '';
     
-    // Network data
-    const isp = ipData?.network?.organisation || 'Unknown';
-    const asnRaw = ipData?.network?.autonomousSystemNumber;
-    const asn = asnRaw ? `AS${asnRaw}` : 'Unknown';
+    // Network data - PRIORITIZE ASN DATA OVER MAIN RESPONSE
+    const isp = asnData?.organisation || ipData?.network?.organisation || 'Unknown';
+    const asnRaw = asnData?.asn || `AS${asnNumber}` || 'Unknown';
+    const asn = asnData?.asn ? asnData.asn : (asnNumber ? `AS${asnNumber}` : 'Unknown');
     const connectionType = ipData?.network?.connectionType || 'Unknown';
+    const registry = asnData?.registry || 'Unknown';
     
     // Confidence/Accuracy data
     const confidence = ipData?.confidence || 'unknown';
@@ -81,8 +103,8 @@ export default async function handler(req, res) {
     const securityThreat = ipData?.securityThreat || null;
     const hazardReport = ipData?.hazardReport || null;
     
-    // --- Generate Map URL ---
-    const mapUrl = generateMapLink(latitude, longitude, accuracyRadius);
+    // --- Generate Enhanced Map URL with Confidence Area ---
+    const mapUrl = generateConfidenceAreaMap(latitude, longitude, confidenceArea, accuracyRadius);
     
     // --- Build Final Data Object ---
     const structuredData = {
@@ -118,8 +140,13 @@ export default async function handler(req, res) {
         isp,
         asn,
         connectionType,
-        organisation: ipData?.network?.organisation || '',
-        carrier: ipData?.network?.carrier || {}
+        registry,
+        organisation: asnData?.organisation || ipData?.network?.organisation || '',
+        name: asnData?.name || 'Unknown',
+        registeredCountry: asnData?.registeredCountryName || 'Unknown',
+        totalIpv4Addresses: asnData?.totalIpv4Addresses || 0,
+        rank: asnData?.rank || null,
+        rankText: asnData?.rankText || ''
       },
       timezone: {
         name: timezone,
@@ -133,7 +160,8 @@ export default async function handler(req, res) {
       metadata: {
         lastUpdated: ipData?.lastUpdated || '',
         isReachable: ipData?.isReachableGlobally || false,
-        rawKeys: Object.keys(ipData)
+        rawKeys: Object.keys(ipData),
+        asnDataPresent: Object.keys(asnData).length > 0
       }
     };
 
@@ -146,7 +174,10 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       data: structuredData,
-      _debug: process.env.NODE_ENV === 'development' ? { rawKeys: Object.keys(ipData) } : undefined
+      _debug: process.env.NODE_ENV === 'development' ? { 
+        rawKeys: Object.keys(ipData),
+        asnKeys: Object.keys(asnData)
+      } : undefined
     });
 
   } catch (err) {
@@ -157,15 +188,79 @@ export default async function handler(req, res) {
 
 // --- Helper Functions ---
 
-function generateMapLink(latitude, longitude, radiusKm) {
+function generateConfidenceAreaMap(latitude, longitude, confidenceArea, radiusKm) {
   if (!latitude || !longitude) return null;
   
-  // Simple Google Maps link - works without API key
-  const zoom = radiusKm > 100 ? 8 : radiusKm > 50 ? 10 : radiusKm > 10 ? 12 : 14;
-  return `https://www.google.com/maps?q=${latitude},${longitude}&z=${zoom}`;
+  // Option 1: If we have a confidence area polygon, use a service that can visualize it
+  if (confidenceArea && Array.isArray(confidenceArea) && confidenceArea.length > 0) {
+    // Create GeoJSON for the confidence area
+    const geoJson = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [longitude, latitude]
+          },
+          properties: {
+            title: "Estimated Location",
+            "marker-color": "#FF0000"
+          }
+        },
+        {
+          type: "Feature",
+          geometry: {
+            type: "Polygon",
+            coordinates: [confidenceArea] // Note: confidenceArea should be array of [lon, lat] pairs
+          },
+          properties: {
+            title: "Confidence Area",
+            stroke: "#0000FF",
+            "stroke-width": 2,
+            "fill": "#0000FF",
+            "fill-opacity": 0.1
+          }
+        }
+      ]
+    };
+    
+    // URL encode the GeoJSON for use with geojson.io
+    const encodedGeoJson = encodeURIComponent(JSON.stringify(geoJson));
+    return `http://geojson.io/#data=data:application/json,${encodedGeoJson}`;
+  }
   
-  // For a visual circle overlay, you'd need Google Maps API key:
-  // return `https://maps.googleapis.com/maps/api/staticmap?center=${latitude},${longitude}&zoom=${zoom}&size=600x300&markers=color:red%7C${latitude},${longitude}&key=YOUR_KEY`;
+  // Option 2: Fallback to regular Google Maps with accuracy circle approximation
+  const zoom = radiusKm > 100 ? 8 : radiusKm > 50 ? 10 : radiusKm > 10 ? 12 : 14;
+  
+  if (radiusKm && radiusKm > 0) {
+    // Create a circle approximation using Google Maps (shows radius visually)
+    const circlePoints = generateCirclePoints(latitude, longitude, radiusKm, 12);
+    const polyline = encodePolyline(circlePoints);
+    return `https://www.google.com/maps/@?api=1&map_action=map&center=${latitude},${longitude}&zoom=${zoom}&basemap=terrain&layer=traffic`;
+  }
+  
+  // Option 3: Basic Google Maps link
+  return `https://www.google.com/maps?q=${latitude},${longitude}&z=${zoom}`;
+}
+
+function generateCirclePoints(lat, lon, radiusKm, points = 36) {
+  const pointsArray = [];
+  const earthRadius = 6371; // km
+  
+  for (let i = 0; i <= points; i++) {
+    const angle = (i * 360 / points) * (Math.PI / 180);
+    const dx = (radiusKm / 111.32) * Math.cos(angle);
+    const dy = (radiusKm / (111.32 * Math.cos(lat * Math.PI / 180))) * Math.sin(angle);
+    pointsArray.push([lat + dx, lon + dy]);
+  }
+  
+  return pointsArray;
+}
+
+function encodePolyline(points) {
+  // Simple polyline encoding (for visualization purposes)
+  return points.map(p => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join('|');
 }
 
 function computeRadiusFromPolygon(confidenceArea) {
@@ -255,6 +350,13 @@ async function sendToDiscord(data) {
   const webhook = process.env.DISCORD_WEBHOOK_URL;
   if (!webhook) return;
   
+  // Format ASN details
+  const asnDetails = [];
+  if (data.network.asn !== 'Unknown') asnDetails.push(`**ASN:** ${data.network.asn}`);
+  if (data.network.registry !== 'Unknown') asnDetails.push(`**Registry:** ${data.network.registry}`);
+  if (data.network.registeredCountry !== 'Unknown') asnDetails.push(`**Registered in:** ${data.network.registeredCountry}`);
+  if (data.network.rankText) asnDetails.push(`**Rank:** ${data.network.rankText}`);
+  
   const embed = {
     embeds: [{
       title: '🌐 Visitor IP Logged',
@@ -293,9 +395,14 @@ async function sendToDiscord(data) {
           inline: true 
         },
         { 
-          name: '📡 Network Details', 
-          value: `**ISP:** ${data.network.isp}\n**ASN:** ${data.network.asn}\n**Type:** ${data.network.connectionType}`, 
-          inline: false 
+          name: '📡 Network Provider', 
+          value: `**ISP:** ${data.network.isp}\n**Connection:** ${data.network.connectionType}`, 
+          inline: true 
+        },
+        { 
+          name: '🔢 ASN Details', 
+          value: asnDetails.length > 0 ? asnDetails.join('\n') : 'Not available',
+          inline: true 
         },
         { 
           name: '🎯 Coordinates & Accuracy', 
@@ -316,16 +423,6 @@ async function sendToDiscord(data) {
           name: '📞 Calling Code', 
           value: `+${data.countryDetails.callingCode}`, 
           inline: true 
-        },
-        { 
-          name: '📋 Postal Code', 
-          value: data.location.postalCode || 'N/A', 
-          inline: true 
-        },
-        { 
-          name: '🖥️ Device', 
-          value: `${data.device.browser} / ${data.device.os} (${data.device.device})`, 
-          inline: true 
         }
       ],
       footer: { 
@@ -337,8 +434,8 @@ async function sendToDiscord(data) {
   // Add map link if available
   if (data.location.mapUrl) {
     embed.embeds[0].fields.push({
-      name: '🗺️ Location Map',
-      value: `[Click to View on Google Maps](${data.location.mapUrl})`,
+      name: '🗺️ Confidence Area Map',
+      value: `[View Confidence Area on Map](${data.location.mapUrl})`,
       inline: false
     });
   }
