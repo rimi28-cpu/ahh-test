@@ -19,8 +19,8 @@ export default async function handler(req, res) {
   
   try {
     const API_KEY = process.env.BIGDATACLOUD_API_KEY;
-    const IP_WEBHOOK_URL = process.env.IP_GEOLOCATION_WEBHOOK;
-    const GPS_WEBHOOK_URL = process.env.REVERSE_GEOCODE_WEBHOOK;
+    const IP_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+    const GPS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
     
     if (!API_KEY) {
       return res.status(500).json({ error: 'API key not configured' });
